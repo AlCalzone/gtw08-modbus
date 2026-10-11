@@ -13,3 +13,10 @@ class NoApplianceError(Gtw08Error):
 
 class GatewayNotReadyError(Gtw08Error):
     """The gateway has not read the appliance's board count yet."""
+
+
+class InvalidValueError(Gtw08Error, ValueError):
+    """A value or argument is outside what the library accepts.
+
+    A write that raises it sends nothing.
+    """

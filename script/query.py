@@ -17,7 +17,7 @@ from modbus_connection.cli_helper import (
     print_component,
 )
 
-from gtw08_modbus import DEFAULT_UNIT_ID, Gtw08Appliance, NoApplianceError
+from gtw08_modbus import DEFAULT_UNIT_ID, Gtw08Appliance, Gtw08Error
 
 # The gateway speaks Modbus RTU on RS-485. An RS-485 to Ethernet converter
 # makes it reachable as Modbus TCP, or as RTU through a socket:// URL.
@@ -95,8 +95,8 @@ async def main() -> int:
         # A raw dump re-reads everything, so count the detection alone.
         poll_reads = counting.reads
         raw = await appliance.async_read_raw() if args.raw else None
-    except NoApplianceError as err:
-        print(f"No appliance behind the gateway: {err}")
+    except Gtw08Error as err:
+        print(f"Could not set up the appliance: {err}")
         return 1
     except ModbusError as err:
         print(f"Could not read the appliance: {str(err) or type(err).__name__}")

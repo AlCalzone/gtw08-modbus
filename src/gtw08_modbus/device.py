@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from typing import TYPE_CHECKING, Self
 
 from modbus_connection import GatewayPathUnavailableError, GatewayTargetError
 from modbus_connection.model import (
-    Component,
     ComponentGroup,
     Device,
     Raw,
@@ -20,7 +19,7 @@ from .appliance import Appliance, HeatPumpPerformance, Service, SystemStatus
 from .boards import BOARD_COUNT, Board, BoardSummary, BoardType, ErrorSummary
 from .cascade import Cascade, ProducerSerial
 from .control import Fallback, SystemControl
-from .errors import GatewayNotReadyError, NoApplianceError
+from .errors import GatewayNotReadyError, InvalidValueError, NoApplianceError
 from .model import UpdateReport
 from .zone import ZONE_COUNT, Zone
 
@@ -48,6 +47,11 @@ READINGS = (
     "cascade",
 )
 SETTINGS = ("system_control", "fallback", "zone_settings")
+# What setup reads once. Only async_read_raw() reads these again.
+SETUP = ("_setup_summary", "_board_types", "_zone_configs")
+
+# A probe returns whether it settled the block: found, or known to be absent.
+type _Probe = Callable[[], Awaitable[bool]]
 
 
 def _still_fetching(report: UpdateReport) -> bool:
@@ -69,15 +73,20 @@ class Gtw08Appliance(Device):
         """Set up the sub-systems.
 
         ``attempts`` and ``retry_delay`` set how often setup asks again while
-        the gateway is still fetching a block. They default to
-        ``DETECT_ATTEMPTS`` and ``DETECT_RETRY_DELAY`` seconds.
+        the gateway is still fetching. They default to ``DETECT_ATTEMPTS`` and
+        ``DETECT_RETRY_DELAY`` seconds. Raises ``InvalidValueError`` for fewer
+        than one attempt.
         """
         super().__init__(unit)
+        attempts = DETECT_ATTEMPTS if attempts is None else attempts
+        if attempts < 1:
+            raise InvalidValueError(f"attempts must be at least 1, not {attempts}")
         if timeout is not None:
             unit.require_timeout(timeout)
-        self._attempts = DETECT_ATTEMPTS if attempts is None else attempts
+        self._attempts = attempts
         self._retry_delay = DETECT_RETRY_DELAY if retry_delay is None else retry_delay
         self._setup_lock = asyncio.Lock()
+        self._pending: dict[str, _Probe] = {}
 
         self.summary = ErrorSummary(unit)
         self.system_status = SystemStatus(unit)
@@ -98,6 +107,9 @@ class Gtw08Appliance(Device):
         self.system_control: SystemControl | None = None
         self.fallback: Fallback | None = None
         self.detect_report: UpdateReport | None = None
+        self._setup_summary: BoardSummary | None = None
+        self._board_types: ComponentGroup | None = None
+        self._zone_configs: ComponentGroup | None = None
 
     @classmethod
     async def async_detect(
@@ -149,6 +161,16 @@ class Gtw08Appliance(Device):
         """Settings component names this device polls; empty before setup."""
         return tuple(name for name in SETTINGS if getattr(self, name) is not None)
 
+    @property
+    def pending_blocks(self) -> tuple[str, ...]:
+        """Optional blocks the gateway was still fetching when setup gave up.
+
+        Every update asks for them once more. A block found that way appears
+        in ``readings_components`` or ``settings_components``, or in
+        ``zone_slots`` for a zone.
+        """
+        return tuple(self._pending)
+
     async def async_ensure_setup(self) -> None:
         """Run setup once, even when two updates start together."""
         async with self._setup_lock:
@@ -156,38 +178,66 @@ class Gtw08Appliance(Device):
 
     async def _async_setup(self) -> None:
         """Find the boards and zones, and settle which optional blocks exist."""
-        unit = self.modbus_unit
-        summary = BoardSummary(unit)
         try:
-            await summary.async_update(notify=False)
+            await self._async_setup_once()
         except GatewayPathUnavailableError as err:
             raise NoApplianceError(
                 "the gateway sees no appliance on its L-Bus"
             ) from err
+
+    async def _async_setup_once(self) -> None:
+        """Run setup; ``_async_setup`` turns a lost L-Bus into ``NoApplianceError``."""
+        unit = self.modbus_unit
+        summary = BoardSummary(unit)
+        await summary.async_update(notify=False)
         if summary.board_count is None:
             raise GatewayNotReadyError("the gateway has no board count yet")
         if summary.board_count == 0:
             raise NoApplianceError("the gateway reports no control board")
+        self._setup_summary = summary
         self.board_count = summary.board_count
         self.zone_count = summary.zone_count
 
         numbers = range(1, min(self.board_count, BOARD_COUNT) + 1)
         types = [BoardType(unit, number) for number in numbers]
-        await ComponentGroup(unit, types).async_update(notify=False)
+        self._board_types = ComponentGroup(unit, types)
+        await self._board_types.async_update(notify=False)
         self.board_list = [
             Board(unit, number, board_type.device_type)
             for number, board_type in zip(numbers, types, strict=True)
         ]
         self.boards = ComponentGroup(unit, self.board_list)
 
-        self.heat_pump = await self._async_read_optional(HeatPumpPerformance(unit))
-        self.system_control = await self._async_read_optional(SystemControl(unit))
-        self.fallback = await self._async_read_optional(Fallback(unit))
-        await self._async_find_cascade()
-        await self._async_find_zones()
+        # One deadline covers every optional block, so a gateway that answers
+        # "not fetched yet" for blocks the appliance lacks cannot stall setup.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + (self._attempts - 1) * self._retry_delay
+        probes: dict[str, _Probe] = {
+            "heat_pump": self._probe_heat_pump,
+            "system_control": self._probe_system_control,
+            "fallback": self._probe_fallback,
+            "serial_number": self._probe_serial_number,
+            "cascade": self._probe_cascade,
+        }
+        last = (
+            ZONE_COUNT if self.zone_count is None else min(self.zone_count, ZONE_COUNT)
+        )
+        for number in range(1, last + 1):
+            probes[f"zone_{number}"] = self._zone_probe(number)
+        for name, probe in probes.items():
+            while not await self._async_settle(name, probe):
+                if loop.time() + self._retry_delay > deadline:
+                    _LOGGER.warning(
+                        "%s is still not fetched; asking again with every update",
+                        name,
+                    )
+                    self._pending[name] = probe
+                    break
+                await asyncio.sleep(self._retry_delay)
+
         _LOGGER.debug(
             "Appliance %s, serial number %s, boards %s, zones %s; readings: %s;"
-            " settings: %s",
+            " settings: %s; pending: %s",
             self.model,
             self.serial_number,
             ", ".join(str(board.model) for board in self.board_list),
@@ -198,76 +248,96 @@ class Gtw08Appliance(Device):
             or "none",
             ", ".join(self.readings_components),
             ", ".join(self.settings_components) or "nothing",
+            ", ".join(self._pending) or "nothing",
         )
 
-    async def _async_read_optional[C: Component](self, component: C) -> C | None:
-        """Read a block the appliance may lack; ``None`` if it does.
+    async def _async_settle(self, name: str, probe: _Probe) -> bool:
+        """Run one probe; ``False`` while the gateway is still fetching."""
+        try:
+            return await probe()
+        except GatewayTargetError:
+            _LOGGER.debug("%s not fetched yet", name)
+            return False
 
-        A block the gateway keeps answering with "not fetched yet" counts as
-        missing after the last attempt.
-        """
-        for attempt in range(1, self._attempts + 1):
-            try:
-                return await read_optional(component)
-            except GatewayTargetError:
-                if attempt == self._attempts:
-                    _LOGGER.info(
-                        "%s still not fetched after %d attempts, leaving it out",
-                        type(component).__name__,
-                        attempt,
-                    )
-                    return None
-            await asyncio.sleep(self._retry_delay)
-        return None
+    async def _async_probe_pending(self) -> None:
+        """Ask once more for each block setup gave up on."""
+        for name, probe in list(self._pending.items()):
+            if await self._async_settle(name, probe):
+                _LOGGER.info("%s answered after setup", name)
+                del self._pending[name]
 
-    async def _async_find_cascade(self) -> None:
-        """Read the serial number, and keep the cascade block if it has producers."""
-        unit = self.modbus_unit
-        if (
-            serial := await self._async_read_optional(ProducerSerial(unit))
-        ) is not None:
+    async def _probe_heat_pump(self) -> bool:
+        self.heat_pump = await read_optional(HeatPumpPerformance(self.modbus_unit))
+        return True
+
+    async def _probe_system_control(self) -> bool:
+        self.system_control = await read_optional(SystemControl(self.modbus_unit))
+        return True
+
+    async def _probe_fallback(self) -> bool:
+        self.fallback = await read_optional(Fallback(self.modbus_unit))
+        return True
+
+    async def _probe_serial_number(self) -> bool:
+        serial = await read_optional(ProducerSerial(self.modbus_unit))
+        if serial is not None:
             self.serial_number = serial.serial_number or None
-        cascade = await self._async_read_optional(Cascade(unit))
+        return True
+
+    async def _probe_cascade(self) -> bool:
+        """Keep the cascade block if it has two producers or more."""
+        cascade = await read_optional(Cascade(self.modbus_unit))
         if cascade is not None and (cascade.producer_count or 0) > 1:
             self.cascade = cascade
+        return True
 
-    async def _async_find_zones(self) -> None:
-        """Keep each zone with a function, up to the count the appliance reports."""
-        count = self.zone_count
-        last = ZONE_COUNT if count is None else min(count, ZONE_COUNT)
-        found: dict[int, Zone] = {}
-        for number in range(1, last + 1):
+    def _zone_probe(self, number: int) -> _Probe:
+        """Keep zone ``number`` if the appliance reports a function for it."""
+
+        async def probe() -> bool:
             zone = Zone(self.modbus_unit, number)
-            if await self._async_read_optional(zone.config) is None:
+            if await read_optional(zone.config) is None:
                 _LOGGER.info("Zone %d refuses its registers, leaving it out", number)
-                continue
+                return True
             if zone.is_configured:
-                found[number] = zone
-        self.zone_slots = found
-        if not found:
-            return
-        zones = list(found.values())
+                self._add_zone(zone)
+            return True
+
+        return probe
+
+    def _add_zone(self, zone: Zone) -> None:
+        """Add a zone and rebuild the groups that poll the zones."""
+        self.zone_slots = dict(sorted({**self.zone_slots, zone.number: zone}.items()))
+        zones = list(self.zone_slots.values())
         unit = self.modbus_unit
         self.zones = ComponentGroup(unit, [zone.readings for zone in zones])
         self.zone_settings = ComponentGroup(unit, [zone.settings for zone in zones])
+        self._zone_configs = ComponentGroup(unit, [zone.config for zone in zones])
+
+    async def _async_prepare(self) -> None:
+        """Set up, then ask again for the blocks setup gave up on."""
+        await self.async_ensure_setup()
+        if self._pending:
+            async with self._setup_lock:
+                await self._async_probe_pending()
 
     async def async_update_readings(self) -> UpdateReport:
         """Refresh what the appliance measures, and its zones."""
-        await self.async_ensure_setup()
+        await self._async_prepare()
         return await self.async_poll(READINGS)
 
     async def async_update_settings(self) -> UpdateReport:
         """Refresh the remote control, fallback and zone settings."""
-        await self.async_ensure_setup()
+        await self._async_prepare()
         return await self.async_poll(SETTINGS)
 
     async def async_update(self) -> UpdateReport:
         """Refresh readings and settings together in one report."""
-        await self.async_ensure_setup()
+        await self._async_prepare()
         return await self.async_poll((*READINGS, *SETTINGS))
 
     async def async_read_raw(self, names: Iterable[str] | None = None) -> Raw:
-        """Every register this device reads, undecoded, for diagnostics."""
+        """Every register this device reads, setup included, undecoded."""
         if names is None:
-            names = (*READINGS, *SETTINGS)
+            names = (*SETUP, *READINGS, *SETTINGS)
         return await super().async_read_raw(names)

@@ -31,7 +31,11 @@ class ZoneSettings(Gtw08Component):
 
     flow_setpoint_fixed = uint16(648, 0.01, unit="°C", writable=True)
     """Display code CP01X: the flow temperature for a zone set to a fixed flow."""
-    mode_setting = enum8(649, ZoneMode, writable=True)
+    mode_setting = enum8(
+        649,
+        ZoneMode,
+        writable=(ZoneMode.SCHEDULING, ZoneMode.MANUAL, ZoneMode.OFF),
+    )
     """Display code CP32X. Takes ``SCHEDULING``, ``MANUAL`` or ``OFF``."""
     room_setpoint_manual = uint16(664, 0.1, unit="°C", writable=True)
     """Display code CP20X: the room temperature the zone holds in manual mode."""

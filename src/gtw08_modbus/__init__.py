@@ -29,7 +29,12 @@ from .enums import (
     ZoneFunction,
     ZoneMode,
 )
-from .errors import GatewayNotReadyError, Gtw08Error, NoApplianceError
+from .errors import (
+    GatewayNotReadyError,
+    Gtw08Error,
+    InvalidValueError,
+    NoApplianceError,
+)
 from .model import UpdateReport
 from .zone import Zone
 
@@ -59,6 +64,7 @@ __all__ = [
     "HeatDemandType",
     "HeatPumpPerformance",
     "HydraulicStatus",
+    "InvalidValueError",
     "NoApplianceError",
     "RemoteControlMode",
     "RemoteHeatDemand",

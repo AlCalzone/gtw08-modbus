@@ -28,11 +28,12 @@ class SystemStatus(Gtw08Component):
 
     system_power = uint8(272, unit="%")
     """The power the consumer manager of the zones asks for."""
-    heat_demand = flags8(275, HeatDemandStatus)
+    # Bit 7 of registers 275 and 280 is padding, so 0xFF can only mean no reading.
+    heat_demand = flags8(275, HeatDemandStatus, nan=0xFF)
     error_list = uint16(277)
     """The manual calls this the "list of errors for all connected devices"."""
     generator_status = flags8(279, GeneratorStatus)
-    hydraulic_status = flags8(280, HydraulicStatus)
+    hydraulic_status = flags8(280, HydraulicStatus, nan=0xFF)
     outdoor_temperature = int16(384, 0.01, unit="°C")
     season_mode = enum8(385, SeasonMode)
 

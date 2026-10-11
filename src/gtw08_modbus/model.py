@@ -9,6 +9,7 @@ data types.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from enum import IntEnum, IntFlag
 from typing import Any, overload
@@ -19,6 +20,8 @@ from modbus_connection.model import (
     UpdateReport,
     WriteValidator,
 )
+
+from .errors import InvalidValueError
 
 __all__ = [
     "Gtw08Component",
@@ -61,30 +64,66 @@ class LowByteField[T](NumberField[T]):
         return super().decode([words[0] & 0xFF], scale_exponent)
 
 
-def _in_range(low: int, high: int, scale: float) -> WriteValidator:
-    """Reject a value whose raw form falls outside ``low`` to ``high``.
+def _decimals(scale: float) -> int:
+    """The decimal places a scale keeps, as ``NumberField`` counts them."""
+    return max(0, len(f"{scale:.10f}".rstrip("0").split(".")[1]))
 
-    The bounds leave out the "not available" values, so a write can never
-    send one.
+
+def _in_range(
+    low: int,
+    high: int,
+    scale: float,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> WriteValidator:
+    """Reject a value whose encoded form falls outside ``low`` to ``high``.
+
+    The raw bounds leave out the "not available" values, so a write can never
+    send one. ``minimum`` and ``maximum`` narrow the range to what the manual
+    allows, in the field's unit.
     """
+    decimals = _decimals(scale)
 
     def validate(value: Any) -> Any:
-        raw = round(float(value) / scale)
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise InvalidValueError(f"{value!r} is not a number")
+        if not math.isfinite(value):
+            raise InvalidValueError(f"{value} is not a finite number")
+        if minimum is not None and value < minimum:
+            raise InvalidValueError(f"{value} is below {minimum:g}")
+        if maximum is not None and value > maximum:
+            raise InvalidValueError(f"{value} is above {maximum:g}")
+        # Round the way NumberField.encode does, so the check sees the raw
+        # value that is sent.
+        raw = round(round(float(value), decimals) / scale)
         if not low <= raw <= high:
-            raise ValueError(f"{value} is outside {low * scale:g} to {high * scale:g}")
+            raise InvalidValueError(
+                f"{value} is outside {low * scale:g} to {high * scale:g}"
+            )
         return value
 
     return validate
 
 
-def _member_of(enum_type: type[IntEnum]) -> WriteValidator:
-    """Reject a value that is not a member of ``enum_type``."""
+def _member_of(
+    enum_type: type[IntEnum], allowed: Iterable[IntEnum] | None = None
+) -> WriteValidator:
+    """Accept a member of ``enum_type``, or its number, out of ``allowed``."""
+    members = frozenset(enum_type if allowed is None else allowed)
 
     def validate(value: Any) -> Any:
+        if isinstance(value, IntEnum) and not isinstance(value, enum_type):
+            raise InvalidValueError(f"{value!r} is not a {enum_type.__name__}")
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise InvalidValueError(f"{value!r} is not a {enum_type.__name__}")
         try:
-            return enum_type(int(value))
+            member = enum_type(value)
         except ValueError:
-            raise ValueError(f"{value} is not a {enum_type.__name__}") from None
+            raise InvalidValueError(f"{value} is not a {enum_type.__name__}") from None
+        if member not in members:
+            raise InvalidValueError(f"{member.name} cannot be written")
+        return member
 
     return validate
 
@@ -190,6 +229,7 @@ def uint8(
     *,
     unit: str | None = None,
     writable: bool = False,
+    maximum: float | None = None,
 ) -> LowByteField[int]: ...
 
 
@@ -200,6 +240,7 @@ def uint8(
     *,
     unit: str | None = None,
     writable: bool = False,
+    maximum: float | None = None,
 ) -> LowByteField[float]: ...
 
 
@@ -209,15 +250,20 @@ def uint8(
     *,
     unit: str | None = None,
     writable: bool = False,
+    maximum: float | None = None,
 ) -> LowByteField[int] | LowByteField[float]:
-    """An unsigned 8-bit value in the low byte of a register."""
+    """An unsigned 8-bit value in the low byte of a register.
+
+    ``maximum`` caps a write at the manual's limit, in the field's unit.
+    """
+    validator = _in_range(0, UINT8_NOT_AVAILABLE - 1, scale, maximum=maximum)
     return LowByteField(
         address,
         scale=scale,
         signed=False,
         nan=UINT8_NOT_AVAILABLE,
         unit=unit,
-        writable=_in_range(0, UINT8_NOT_AVAILABLE - 1, scale) if writable else False,
+        writable=validator if writable else False,
         force_fc16=writable,
     )
 
@@ -226,22 +272,25 @@ def enum8[E: IntEnum](
     address: int,
     enum_type: type[E],
     *,
-    writable: bool = False,
+    writable: bool | Iterable[E] = False,
     stride: int = 0,
     nan: int | Iterable[int] | None = UINT8_NOT_AVAILABLE,
 ) -> LowByteField[E]:
     """An ENUM8 value in the low byte of a register.
 
-    Pass ``nan=None`` for an enum that uses 255 as a real value.
+    Pass the members a write may send as ``writable`` when only some may be
+    written. Pass ``nan=None`` for an enum that uses 255 as a real value.
     """
+    allowed = None if isinstance(writable, bool) else list(writable)
+    can_write = allowed is not None or writable is True
     return LowByteField(
         address,
         signed=False,
         convert=enum_type,
         nan=nan,
         stride=stride,
-        writable=_member_of(enum_type) if writable else False,
-        force_fc16=writable,
+        writable=_member_of(enum_type, allowed) if can_write else False,
+        force_fc16=can_write,
     )
 
 
@@ -255,6 +304,11 @@ def bool8(address: int) -> LowByteField[bool]:
     )
 
 
-def flags8[F: IntFlag](address: int, flag_type: type[F]) -> LowByteField[F]:
-    """An 8-bit bitfield in the low byte of a register."""
-    return LowByteField(address, signed=False, convert=flag_type)
+def flags8[F: IntFlag](
+    address: int, flag_type: type[F], *, nan: int | None = None
+) -> LowByteField[F]:
+    """An 8-bit bitfield in the low byte of a register.
+
+    Pass ``nan=0xFF`` for a bitfield whose top bit is never set.
+    """
+    return LowByteField(address, signed=False, convert=flag_type, nan=nan)
