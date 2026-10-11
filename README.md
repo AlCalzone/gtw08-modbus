@@ -6,10 +6,8 @@ The library builds on [modbus-connection](https://github.com/home-assistant-libs
 
 ## Installation
 
-The package is not on PyPI yet. Install it from git:
-
 ```bash
-pip install "gtw08-modbus @ git+https://github.com/AlCalzone/gtw08-modbus@main"
+pip install gtw08-modbus
 ```
 
 ## Usage
