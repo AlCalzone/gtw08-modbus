@@ -5,9 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Self
 
-from modbus_connection import GatewayPathUnavailableError, GatewayTargetError
+from modbus_connection import (
+    GatewayPathUnavailableError,
+    GatewayTargetError,
+    ModbusConnectionError,
+    ModbusError,
+)
 from modbus_connection.model import (
     ComponentGroup,
     Device,
@@ -48,10 +54,22 @@ READINGS = (
 )
 SETTINGS = ("system_control", "fallback", "zone_settings")
 # What setup reads once. Only async_read_raw() reads these again.
-SETUP = ("_setup_summary", "_board_types", "_zone_configs")
+SETUP = ("_setup_summary", "_board_types", "_serial", "_zone_configs")
 
 # A probe returns whether it settled the block: found, or known to be absent.
 type _Probe = Callable[[], Awaitable[bool]]
+
+# The most readings updates to skip between two asks for a pending block.
+PENDING_MAX_SKIP = 31
+
+
+@dataclass
+class _Pending:
+    """A block setup gave up on, and when to ask for it again."""
+
+    probe: _Probe
+    misses: int = 0
+    skip: int = 0
 
 
 def _still_fetching(report: UpdateReport) -> bool:
@@ -86,7 +104,7 @@ class Gtw08Appliance(Device):
         self._attempts = attempts
         self._retry_delay = DETECT_RETRY_DELAY if retry_delay is None else retry_delay
         self._setup_lock = asyncio.Lock()
-        self._pending: dict[str, _Probe] = {}
+        self._pending: dict[str, _Pending] = {}
 
         self.summary = ErrorSummary(unit)
         self.system_status = SystemStatus(unit)
@@ -110,6 +128,7 @@ class Gtw08Appliance(Device):
         self._setup_summary: BoardSummary | None = None
         self._board_types: ComponentGroup | None = None
         self._zone_configs: ComponentGroup | None = None
+        self._serial: ProducerSerial | None = None
 
     @classmethod
     async def async_detect(
@@ -165,7 +184,8 @@ class Gtw08Appliance(Device):
     def pending_blocks(self) -> tuple[str, ...]:
         """Optional blocks the gateway was still fetching when setup gave up.
 
-        Every update asks for them once more. A block found that way appears
+        Readings updates ask for them again, less often each time one stays
+        unanswered. A block found that way appears
         in ``readings_components`` or ``settings_components``, or in
         ``zone_slots`` for a zone.
         """
@@ -188,6 +208,13 @@ class Gtw08Appliance(Device):
     async def _async_setup_once(self) -> None:
         """Run setup; ``_async_setup`` turns a lost L-Bus into ``NoApplianceError``."""
         unit = self.modbus_unit
+        # A setup that failed halfway runs again from the start.
+        self._pending.clear()
+        self.board_list, self.boards = [], None
+        self.zone_slots, self.zones, self.zone_settings = {}, None, None
+        self._zone_configs = self._serial = None
+        self.heat_pump = self.system_control = self.fallback = self.cascade = None
+        self.serial_number = None
         summary = BoardSummary(unit)
         await summary.async_update(notify=False)
         if summary.board_count is None:
@@ -237,7 +264,8 @@ class Gtw08Appliance(Device):
                         "%s is still not fetched; asking again with every update",
                         name,
                     )
-                    self._pending[name] = probe
+                    # Setup has just asked, so the update that ran it skips it.
+                    self._pending[name] = _Pending(probe, misses=1, skip=1)
                     break
                 attempt += 1
                 await asyncio.sleep(self._retry_delay)
@@ -267,11 +295,24 @@ class Gtw08Appliance(Device):
             return False
 
     async def _async_probe_pending(self) -> None:
-        """Ask once more for each block setup gave up on."""
-        for name, probe in list(self._pending.items()):
-            if await self._async_settle(name, probe):
+        """Ask again for the blocks setup gave up on whose turn it is."""
+        for name, pending in list(self._pending.items()):
+            if pending.skip:
+                pending.skip -= 1
+                continue
+            try:
+                settled = await self._async_settle(name, pending.probe)
+            except ModbusConnectionError:
+                raise
+            except ModbusError as err:
+                _LOGGER.debug("%s did not answer: %s", name, err)
+                settled = False
+            if settled:
                 _LOGGER.info("%s answered after setup", name)
                 del self._pending[name]
+                continue
+            pending.misses += 1
+            pending.skip = min(2**pending.misses - 1, PENDING_MAX_SKIP)
 
     async def _probe_heat_pump(self) -> bool:
         self.heat_pump = await read_optional(HeatPumpPerformance(self.modbus_unit))
@@ -288,6 +329,7 @@ class Gtw08Appliance(Device):
     async def _probe_serial_number(self) -> bool:
         serial = await read_optional(ProducerSerial(self.modbus_unit))
         if serial is not None:
+            self._serial = serial
             self.serial_number = serial.serial_number or None
         return True
 
@@ -321,7 +363,7 @@ class Gtw08Appliance(Device):
         self.zone_settings = ComponentGroup(unit, [zone.settings for zone in zones])
         self._zone_configs = ComponentGroup(unit, [zone.config for zone in zones])
 
-    async def _async_prepare(self) -> None:
+    async def _async_prepare_readings(self) -> None:
         """Set up, then ask again for the blocks setup gave up on."""
         await self.async_ensure_setup()
         if self._pending:
@@ -330,17 +372,17 @@ class Gtw08Appliance(Device):
 
     async def async_update_readings(self) -> UpdateReport:
         """Refresh what the appliance measures, and its zones."""
-        await self._async_prepare()
+        await self._async_prepare_readings()
         return await self.async_poll(READINGS)
 
     async def async_update_settings(self) -> UpdateReport:
         """Refresh the remote control, fallback and zone settings."""
-        await self._async_prepare()
+        await self.async_ensure_setup()
         return await self.async_poll(SETTINGS)
 
     async def async_update(self) -> UpdateReport:
         """Refresh readings and settings together in one report."""
-        await self._async_prepare()
+        await self._async_prepare_readings()
         return await self.async_poll((*READINGS, *SETTINGS))
 
     async def async_read_raw(self, names: Iterable[str] | None = None) -> Raw:

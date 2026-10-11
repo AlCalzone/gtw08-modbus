@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
 from modbus_connection import ModbusUnit
@@ -74,6 +75,12 @@ class SystemControl(Gtw08Component):
                 raise InvalidValueError(f"{mode.name} needs a power")
             if mode is not RemoteControlMode.POWER and temperature is None:
                 raise InvalidValueError(f"{mode.name} needs a temperature")
+        # Check every value before the first write, so a bad argument sends
+        # nothing.
+        if power is not None:
+            self._validate("power", power)
+        if temperature is not None:
+            self._validate("temperature", temperature)
 
         async with self._lock:
             try:
@@ -87,14 +94,29 @@ class SystemControl(Gtw08Component):
                 await self.write("heat_demand", heat_demand)
             except BaseException:
                 # Roll back a failed mode write too because a write that timed
-                # out may still have reached the gateway.
-                try:
-                    await self.write("mode", RemoteControlMode.MONITORING_ONLY)
-                except Exception as err:
-                    _LOGGER.warning(
-                        "Could not put the gateway back to monitoring only: %s", err
-                    )
+                # out may still have reached the gateway. The rollback runs
+                # as its own task and must finish, even if this one is
+                # cancelled again while it waits.
+                rollback = asyncio.create_task(self._async_roll_back())
+                while not rollback.done():
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.shield(rollback)
                 raise
+
+    def _validate(self, field: str, value: object) -> None:
+        """Run a field's write check without writing."""
+        validator = self.declared_fields[field].writable
+        if callable(validator):
+            validator(value)
+
+    async def _async_roll_back(self) -> None:
+        """Put the gateway back to monitoring only, logging a failure."""
+        try:
+            await self.write("mode", RemoteControlMode.MONITORING_ONLY)
+        except Exception as err:
+            _LOGGER.warning(
+                "Could not put the gateway back to monitoring only: %s", err
+            )
 
     async def async_stop(self) -> None:
         """Hand the heat demand back to the zones."""

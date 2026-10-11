@@ -59,12 +59,12 @@ Every value is `None` until the first update. Each update returns an `UpdateRepo
 
 ## Gotchas
 
-- **Lazy gateway:** the gateway fetches each value from the appliance the first time it is asked, and answers `GatewayTargetError` until it has it. Setup and `async_detect()` ask again, within about eight seconds by default. An optional block still unfetched after that is listed in `pending_blocks` and asked for again with every update. A later poll can list a component as failed once.
+- **Lazy gateway:** the gateway fetches each value from the appliance the first time it is asked, and answers `GatewayTargetError` until it has it. Setup and `async_detect()` ask again, within about eight seconds by default. An optional block still unfetched after that is listed in `pending_blocks`. Readings updates ask for it again, less often each time it stays unanswered. A later poll can list a component as failed once.
 - **Static values:** the board count, zone count, board types and zone functions are read once, at setup. A board or zone added later needs a new `Gtw08Appliance`.
 - **Remote control:** while `system_control.mode` is anything but `MONITORING_ONLY`, the appliance ignores the heat demand of its zones. A failed `async_request()` puts it back to `MONITORING_ONLY`.
 - **Missing values:** a value the appliance does not have, such as the flue gas temperature of a heat pump, stays `None`.
 - **Write ranges:** a write outside the field's range, or one that would send a "not available" value, raises `InvalidValueError` before anything is sent. So does a value of the wrong type, such as `True` or a member of another enum.
-- **Testing:** built from the manufacturer's configuration manual 7854678 (September 2023) and tested against modbus-connection's mock. It has not been tested on real hardware. These readings of the manual still need a real gateway to confirm: the "not available" values, the zone function codes, the 512-register zone step, whether service hours count in steps of 2, how the gateway answers for a block the appliance lacks, and whether it refuses all of registers 400 to 404 when a boiler lacks the heat pump temperatures or a heat pump the flue gas temperature.
+- **Testing:** built from the manufacturer's configuration manual 7854678 (September 2023) and tested against modbus-connection's mock. It has not been tested on real hardware. These readings of the manual still need a real gateway to confirm: the "not available" values, the zone function codes, the 512-register zone step, whether service hours count in steps of 2, how the gateway answers for a block the appliance lacks, and whether it refuses all of registers 400 to 404 when a boiler lacks the heat pump temperatures or a heat pump the flue gas temperature, and whether the 0-10 V input at register 21027 really takes up to 25 V as table 55 says.
 
 ## API
 
@@ -81,7 +81,7 @@ The appliance behind one GTW-08 gateway. Construction does no I/O.
 - `serial_number`: the producer serial number, or `None`.
 - `board_count`, `zone_count`: how many boards and zones the appliance reports.
 - `detect_report`: the `UpdateReport` of the last update `async_detect()` ran.
-- `pending_blocks`: optional blocks the gateway was still fetching when setup gave up. Every update asks for them again.
+- `pending_blocks`: optional blocks the gateway was still fetching when setup gave up. Readings updates ask for them again, less often each time.
 - `readings_components`, `settings_components`: the names of the components this appliance polls.
 - `summary`, `system_status`, `appliance`, `service`, `board_list`, `heat_pump`, `zone_slots`, `cascade`, `system_control`, `fallback`: the components below.
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
-from enum import IntEnum, IntFlag
+from enum import Enum, IntEnum, IntFlag
 from typing import Any, overload
 
 from modbus_connection.model import (
@@ -64,6 +64,10 @@ class LowByteField[T](NumberField[T]):
         return super().decode([words[0] & 0xFF], scale_exponent)
 
 
+# Larger ints lose precision as a float, and far larger ones overflow it.
+_LARGEST_EXACT_INT = 2**53
+
+
 def _decimals(scale: float) -> int:
     """The decimal places a scale keeps, as ``NumberField`` counts them."""
     return max(0, len(f"{scale:.10f}".rstrip("0").split(".")[1]))
@@ -88,8 +92,13 @@ def _in_range(
     def validate(value: Any) -> Any:
         if isinstance(value, bool) or not isinstance(value, int | float):
             raise InvalidValueError(f"{value!r} is not a number")
-        if not math.isfinite(value):
+        if isinstance(value, int) and abs(value) > _LARGEST_EXACT_INT:
+            raise InvalidValueError(f"{value} is out of range")
+        if isinstance(value, float) and not math.isfinite(value):
             raise InvalidValueError(f"{value} is not a finite number")
+        if scale == 1 and not float(value).is_integer():
+            # NumberField.encode truncates at scale 1, so 2.7 would send 2
+            raise InvalidValueError(f"{value} is not a whole number")
         if minimum is not None and value < minimum:
             raise InvalidValueError(f"{value} is below {minimum:g}")
         if maximum is not None and value > maximum:
@@ -113,7 +122,7 @@ def _member_of(
     members = frozenset(enum_type if allowed is None else allowed)
 
     def validate(value: Any) -> Any:
-        if isinstance(value, IntEnum) and not isinstance(value, enum_type):
+        if isinstance(value, Enum) and not isinstance(value, enum_type):
             raise InvalidValueError(f"{value!r} is not a {enum_type.__name__}")
         if isinstance(value, bool) or not isinstance(value, int):
             raise InvalidValueError(f"{value!r} is not a {enum_type.__name__}")
