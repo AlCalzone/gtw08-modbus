@@ -49,7 +49,9 @@ class Cascade(Gtw08Component):
     """Display code NC000: hours spent on central heating."""
     hours_dhw = uint32(7162, unit="h")
     """Display code NC001: hours spent on domestic hot water."""
-    return_temperature = int16(7163, 0.01, unit="°C")
+    # Table 23 lists NM165 at 7163, which the uint32 at 7162 covers. Table 46
+    # lists it at 7164.
+    return_temperature = int16(7164, 0.01, unit="°C")
     """Display code NM165."""
     header_flow_temperature = int16(7168, 0.01, unit="°C")
     """Display code EM012: the flow on the secondary side of the low loss header."""

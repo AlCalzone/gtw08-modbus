@@ -56,8 +56,8 @@ class Appliance(Gtw08Component):
     """Display code AM019: the pressure of the primary circuit."""
     status = enum8(411, ApplianceStatus)
     """Display code AM012."""
-    sub_status = enum8(412, ApplianceSubStatus)
-    """Display code AM014."""
+    sub_status = enum8(412, ApplianceSubStatus, nan=None)
+    """Display code AM014. Code 255 is a real state: out of safety unit resets."""
     relative_power = uint16(413, unit="%")
     """Display code AM024."""
     generator_starts = uint32(419)
@@ -114,6 +114,9 @@ class Service(Gtw08Component):
     """Display code AM011."""
     notification = enum8(513, ServiceNotification)
     """The current or upcoming service notification."""
+    # The manual gives registers 514 and 515 a resolution of "2 hours". It is
+    # unclear whether that is a factor, so they are read as plain hours until
+    # a real appliance settles it.
     hours_producing_since_service = uint16(514, unit="h")
     """Display code AC002."""
     hours_since_service = uint16(515, unit="h")

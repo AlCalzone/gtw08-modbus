@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+
+from modbus_connection import ModbusUnit
+
 from .enums import (
     AnalogInputFunction,
     FallbackConfiguration,
@@ -19,6 +24,11 @@ class SystemControl(Gtw08Component):
     While ``mode`` is anything other than ``MONITORING_ONLY``, the appliance
     ignores the heat demand of its zones.
     """
+
+    def __init__(self, unit: ModbusUnit) -> None:
+        """Set up the lock that keeps two requests from interleaving."""
+        super().__init__(unit)
+        self._lock = asyncio.Lock()
 
     power = uint8(256, unit="%", writable=True)
     """The requested power, between the system's minimum (0) and maximum (100)."""
@@ -38,36 +48,37 @@ class SystemControl(Gtw08Component):
         """Take over the heat demand.
 
         Pass ``power`` in percent for the power modes and ``temperature`` in °C
-        for the temperature modes. Raises ``ValueError`` when one the mode
-        needs is missing.
+        for the temperature modes. ``STANDBY`` needs neither. Raises
+        ``ValueError`` when one the mode needs is missing. When a write fails,
+        the gateway is put back to monitoring only and the error is raised.
         """
         if mode is RemoteControlMode.MONITORING_ONLY:
             raise ValueError("use async_stop() to return to monitoring only")
-        needs_power = mode in (
-            RemoteControlMode.TEMPERATURE_AND_POWER,
-            RemoteControlMode.POWER,
-        )
-        needs_temperature = mode in (
-            RemoteControlMode.TEMPERATURE_AND_POWER,
-            RemoteControlMode.TEMPERATURE,
-        )
-        if needs_power and power is None:
-            raise ValueError(f"{mode.name} needs a power")
-        if needs_temperature and temperature is None:
-            raise ValueError(f"{mode.name} needs a temperature")
+        if heat_demand is not RemoteHeatDemand.STANDBY:
+            if mode is not RemoteControlMode.TEMPERATURE and power is None:
+                raise ValueError(f"{mode.name} needs a power")
+            if mode is not RemoteControlMode.POWER and temperature is None:
+                raise ValueError(f"{mode.name} needs a temperature")
 
-        # The mode must go first because the gateway ignores registers 256, 257
-        # and 259 until 258 leaves monitoring only.
-        await self.write("mode", mode)
-        if power is not None:
-            await self.write("power", power)
-        if temperature is not None:
-            await self.write("temperature", temperature)
-        await self.write("heat_demand", heat_demand)
+        async with self._lock:
+            # The mode must go first because the gateway ignores registers 256,
+            # 257 and 259 until 258 leaves monitoring only.
+            await self.write("mode", mode)
+            try:
+                if power is not None:
+                    await self.write("power", power)
+                if temperature is not None:
+                    await self.write("temperature", temperature)
+                await self.write("heat_demand", heat_demand)
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    await self.write("mode", RemoteControlMode.MONITORING_ONLY)
+                raise
 
     async def async_stop(self) -> None:
         """Hand the heat demand back to the zones."""
-        await self.write("mode", RemoteControlMode.MONITORING_ONLY)
+        async with self._lock:
+            await self.write("mode", RemoteControlMode.MONITORING_ONLY)
 
 
 class Fallback(Gtw08Component):

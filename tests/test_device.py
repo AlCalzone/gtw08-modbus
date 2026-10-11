@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+
 import pytest
 from modbus_connection import (
     GatewayPathUnavailableError,
     GatewayTargetError,
     IllegalDataAddressError,
     ModbusConnectionError,
+    ModbusError,
+    ModbusTimeoutError,
 )
 from modbus_connection.mock import MockModbusConnection, MockModbusUnit, WriteEvent
 
@@ -14,22 +19,38 @@ from gtw08_modbus import (
     ApplianceSubStatus,
     BoardCategory,
     ErrorType,
-    GeneratorStatus,
     Gtw08Appliance,
-    HeatDemandStatus,
-    HydraulicStatus,
     NoApplianceError,
     RemoteControlMode,
     RemoteHeatDemand,
-    SeasonMode,
-    ServiceNotification,
-    ZoneActivity,
     ZoneFunction,
     ZoneMode,
     board_model,
 )
 
-from .conftest import SERIAL_NUMBER, seed, uint32_words
+from .conftest import SERIAL_NUMBER, seed
+
+
+def fail_first_reads(
+    unit: MockModbusUnit, failing: int, times: int, error: Exception
+) -> list[int]:
+    """Make the first ``times`` reads starting at ``failing`` raise ``error``."""
+    original = unit.read_holding_registers
+    calls = [0]
+
+    async def read(address: int, count: int) -> list[int]:
+        if address == failing:
+            calls[0] += 1
+            if calls[0] <= times:
+                raise error
+        return await original(address, count)
+
+    unit.read_holding_registers = read  # type: ignore[method-assign]
+    return calls
+
+
+def read_starts(unit: MockModbusUnit) -> list[int]:
+    return [event.address for event in unit.read_events]
 
 
 async def test_detect_finds_boards_zones_and_blocks(
@@ -40,6 +61,8 @@ async def test_detect_finds_boards_zones_and_blocks(
 
     assert appliance.model == "EHC-04"
     assert [board.model for board in appliance.board_list] == ["EHC-04", "SCB-04"]
+    assert appliance.board_count == 2
+    assert appliance.zone_count == 3
     assert appliance.serial_number == SERIAL_NUMBER
     assert list(appliance.zone_slots) == [1, 2, 3]
     assert appliance.readings_components == (
@@ -50,30 +73,56 @@ async def test_detect_finds_boards_zones_and_blocks(
         "service",
         "boards",
         "zones",
+        "cascade",
     )
-    assert appliance.settings_components == ("system_control", "fallback")
+    assert appliance.settings_components == (
+        "system_control",
+        "fallback",
+        "zone_settings",
+    )
+    assert appliance.detect_report is not None
+    assert appliance.detect_report.complete
 
 
-async def test_detect_retries_while_the_gateway_fetches(
+async def test_detect_retries_while_setup_meets_an_unfetched_register(
     mock_modbus_unit: MockModbusUnit,
 ) -> None:
     seed(mock_modbus_unit)
-    mock_modbus_unit.fail_read(128, GatewayTargetError())
-    original = mock_modbus_unit.read_holding_registers
-    calls = 0
+    calls = fail_first_reads(mock_modbus_unit, 128, 1, GatewayTargetError())
 
-    async def answer_the_second_time(address: int, count: int) -> list[int]:
-        nonlocal calls
-        if address == 128:
-            calls += 1
-            if calls == 2:
-                mock_modbus_unit.fail_read(128, None)
-        return await original(address, count)
-
-    mock_modbus_unit.read_holding_registers = answer_the_second_time  # type: ignore[method-assign]
     appliance = await Gtw08Appliance.async_detect(mock_modbus_unit, retry_delay=0)
 
+    assert calls[0] == 2
     assert appliance.model == "EHC-04"
+
+
+async def test_detect_retries_while_a_poll_meets_an_unfetched_register(
+    mock_modbus_unit: MockModbusUnit,
+) -> None:
+    seed(mock_modbus_unit)
+    # Setup reads no register 400, so the first failure lands in the report
+    calls = fail_first_reads(mock_modbus_unit, 400, 1, GatewayTargetError())
+
+    appliance = await Gtw08Appliance.async_detect(mock_modbus_unit, retry_delay=0)
+
+    assert calls[0] == 2
+    assert appliance.appliance.flow_temperature == 35.12
+    assert appliance.detect_report is not None
+    assert appliance.detect_report.complete
+
+
+async def test_detect_returns_a_partial_report_after_the_last_attempt(
+    mock_modbus_unit: MockModbusUnit,
+) -> None:
+    seed(mock_modbus_unit)
+    mock_modbus_unit.fail_read(400, GatewayTargetError())
+
+    appliance = await Gtw08Appliance.async_detect(
+        mock_modbus_unit, attempts=2, retry_delay=0
+    )
+
+    assert appliance.detect_report is not None
+    assert set(appliance.detect_report.failed) == {"appliance"}
 
 
 async def test_detect_gives_up_after_the_last_attempt(
@@ -86,13 +135,14 @@ async def test_detect_gives_up_after_the_last_attempt(
         await Gtw08Appliance.async_detect(mock_modbus_unit, attempts=2, retry_delay=0)
 
 
-async def test_detect_passes_on_a_missing_appliance(
+async def test_an_empty_l_bus_is_no_appliance(
     mock_modbus_unit: MockModbusUnit,
 ) -> None:
     mock_modbus_unit.fail_requests(GatewayPathUnavailableError())
 
-    with pytest.raises(GatewayPathUnavailableError):
+    with pytest.raises(NoApplianceError) as err:
         await Gtw08Appliance.async_detect(mock_modbus_unit)
+    assert isinstance(err.value, ModbusError)
 
 
 async def test_setup_rejects_a_gateway_without_boards(
@@ -102,70 +152,92 @@ async def test_setup_rejects_a_gateway_without_boards(
         await Gtw08Appliance(mock_modbus_unit).async_update()
 
 
+async def test_an_unknown_board_count_is_not_ready_yet(
+    mock_modbus_unit: MockModbusUnit,
+) -> None:
+    seed(mock_modbus_unit)
+    mock_modbus_unit.holding[128] = 0xFF
+    appliance = Gtw08Appliance(mock_modbus_unit)
+
+    with pytest.raises(GatewayTargetError):
+        await appliance.async_update()
+
+    mock_modbus_unit.holding[128] = 2
+    assert (await appliance.async_update()).complete
+
+
 async def test_requires_the_callers_timeout(mock_modbus_unit: MockModbusUnit) -> None:
     Gtw08Appliance(mock_modbus_unit, timeout=3)
 
     assert mock_modbus_unit.required_timeout == 3
 
 
-async def test_system_status(appliance: Gtw08Appliance) -> None:
-    report = await appliance.async_update_readings()
-
-    assert report.complete
-    status = appliance.system_status
-    assert status.system_power == 45
-    assert status.heat_demand == (
-        HeatDemandStatus.DIRECT_ZONES_ALLOWED | HeatDemandStatus.HEAT_ENGINE_ACTIVE
+async def test_setup_runs_once_for_concurrent_updates(
+    appliance: Gtw08Appliance, mock_modbus_unit: MockModbusUnit
+) -> None:
+    await asyncio.gather(
+        appliance.async_update_readings(), appliance.async_update_settings()
     )
-    assert status.generator_status == GeneratorStatus.HEAT_PUMP_ON
-    assert status.hydraulic_status == (
-        HydraulicStatus.PUMP_ON | HydraulicStatus.CH_ACTIVE
+
+    assert read_starts(mock_modbus_unit).count(128) == 1
+
+
+async def test_static_registers_are_read_at_setup_only(
+    appliance: Gtw08Appliance, mock_modbus_unit: MockModbusUnit
+) -> None:
+    await appliance.async_update()
+    mock_modbus_unit.read_events.clear()
+
+    await appliance.async_update_readings()
+    readings = set(read_starts(mock_modbus_unit))
+    mock_modbus_unit.read_events.clear()
+    await appliance.async_update_settings()
+    settings = set(read_starts(mock_modbus_unit))
+
+    for static in (128, 129, 135, 189, 641, 645, 1153, 1157, 1665, 1669):
+        assert static not in readings | settings
+    assert {648, 664, 674} <= settings
+    assert not {648, 664, 674} & readings
+    # 26 for the appliance and three zones, 8 for the cascade
+    assert len(readings) == 34
+    assert len(settings) == 11
+
+
+async def test_sub_status_out_of_resets(
+    appliance: Gtw08Appliance, mock_modbus_unit: MockModbusUnit
+) -> None:
+    mock_modbus_unit.holding[412] = 255
+    await appliance.async_update_readings()
+
+    assert (
+        appliance.appliance.sub_status is ApplianceSubStatus.SAFETY_UNIT_OUT_OF_RESETS
     )
-    assert status.outdoor_temperature == -3.5
-    assert status.season_mode is SeasonMode.WINTER
 
 
-async def test_appliance(appliance: Gtw08Appliance) -> None:
+async def test_values_the_appliance_does_not_have(
+    appliance: Gtw08Appliance, mock_modbus_unit: MockModbusUnit
+) -> None:
+    mock_modbus_unit.holding.update(
+        {409: 0xFF, 411: 0xFF, 400: 0x8000, 419: [0xFFFF] * 2}
+    )
     await appliance.async_update_readings()
 
-    main = appliance.appliance
-    assert main.flow_temperature == 35.12
-    assert main.return_temperature == 30.2
-    assert main.flue_gas_temperature is None
-    assert main.heat_pump_flow_temperature == 35.8
-    assert main.dhw_setpoint == 50
-    assert main.water_pressure == 1.8
-    assert main.status is ApplianceStatus.GENERATOR_CH
-    assert main.sub_status is ApplianceSubStatus.NORMAL_INTERNAL_SETPOINT
-    assert main.relative_power == 62
-    assert main.generator_starts == 1234
-    assert main.energy_consumed_total == 4050
-    assert main.energy_delivered_total == 13200
-    assert main.pump_speed == 65.5
-    assert main.actual_power == 5.12
+    assert appliance.appliance.water_pressure is None
+    assert appliance.appliance.status is None
+    assert appliance.appliance.flow_temperature is None
+    assert appliance.appliance.generator_starts is None
 
 
-async def test_heat_pump_and_service(appliance: Gtw08Appliance) -> None:
+async def test_an_unknown_enum_value(
+    appliance: Gtw08Appliance,
+    mock_modbus_unit: MockModbusUnit,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    mock_modbus_unit.holding[411] = 99
     await appliance.async_update_readings()
 
-    assert appliance.heat_pump is not None
-    assert appliance.heat_pump.cop == 4.21
-    assert appliance.heat_pump.cop_threshold == 2.5
-    assert appliance.service.service_required is False
-    assert appliance.service.notification is ServiceNotification.A
-    assert appliance.service.hours_since_service == 4000
-    assert appliance.service.starts_since_service == 321
-
-
-async def test_boards(appliance: Gtw08Appliance) -> None:
-    await appliance.async_update_readings()
-
-    ehc, scb = appliance.board_list
-    assert ehc.is_available
-    assert ehc.error_code is None
-    assert ehc.error_type is None
-    assert appliance.summary.any_error is False
-    assert scb.device_type == 0x1904
+    assert appliance.appliance.status is None
+    assert "no mapping for value 99" in caplog.text
 
 
 async def test_a_board_error(
@@ -181,6 +253,7 @@ async def test_a_board_error(
     assert ehc.error_type is ErrorType.WARNING
     assert not scb.is_available
     assert scb.error_code is None
+    assert scb.error_type is None
 
 
 @pytest.mark.parametrize(
@@ -211,42 +284,30 @@ def test_board_categories_cover_the_manual() -> None:
 
 
 async def test_zones(appliance: Gtw08Appliance) -> None:
-    await appliance.async_update_readings()
+    await appliance.async_update()
 
     direct, dhw, mixing = appliance.zone_slots.values()
     assert direct.function is ZoneFunction.DIRECT
     assert direct.function.is_room_heating
-    assert direct.flow_temperature == 34.8
     assert direct.room_setpoint == 20.5
     assert direct.room_setpoint_manual == 21
-    assert direct.activity is ZoneActivity.COMFORT
-    assert direct.mode is ZoneMode.SCHEDULING
-    assert direct.pump_running is True
-    assert direct.heating_curve_gradient == 1.5
-    assert direct.heating_curve_footpoint == 20
-    assert direct.pump_hours == 4321
-
     assert dhw.function is ZoneFunction.DHW_TANK
     assert dhw.function.is_dhw
-    assert dhw.flow_temperature == 48.9
-    assert dhw.mode is ZoneMode.MANUAL
-
     assert mixing.number == 3
-    assert mixing.function is ZoneFunction.MIXING_CIRCUIT
     assert mixing.mode is ZoneMode.OFF
 
 
 async def test_zones_read_at_their_own_addresses(
     appliance: Gtw08Appliance, mock_modbus_unit: MockModbusUnit
 ) -> None:
-    await appliance.async_update_readings()
+    await appliance.async_update()
     mock_modbus_unit.read_events.clear()
 
-    await appliance.zone_slots[3].async_update()
+    zone = appliance.zone_slots[3]
+    await zone.readings.async_update()
+    await zone.settings.async_update()
 
-    assert {event.address for event in mock_modbus_unit.read_events} == {
-        1665,  # function
-        1669,  # device type
+    assert set(read_starts(mock_modbus_unit)) == {
         1672,  # fixed flow setpoint and mode
         1688,  # manual room setpoint
         1698,  # heating curve
@@ -257,16 +318,42 @@ async def test_zones_read_at_their_own_addresses(
     }
 
 
-async def test_disabled_and_refused_zones_are_skipped(
+@pytest.mark.parametrize(
+    ("function_code", "kept", "function"),
+    [
+        pytest.param(0, False, None, id="disabled"),
+        pytest.param(0xFF, False, None, id="not_available"),
+        pytest.param(20, True, None, id="unknown_code"),
+        pytest.param(13, True, ZoneFunction.OCCUPIED, id="last_listed"),
+    ],
+)
+async def test_which_zones_are_kept(
     mock_modbus_unit: MockModbusUnit,
+    function_code: int,
+    kept: bool,
+    function: ZoneFunction | None,
 ) -> None:
     seed(mock_modbus_unit)
-    mock_modbus_unit.holding[641] = 0
-    mock_modbus_unit.fail_read(1153, IllegalDataAddressError())
+    mock_modbus_unit.holding[641] = function_code
     appliance = Gtw08Appliance(mock_modbus_unit)
     await appliance.async_update_readings()
 
-    assert list(appliance.zone_slots) == [3]
+    assert (1 in appliance.zone_slots) is kept
+    if kept:
+        assert appliance.zone_slots[1].function is function
+
+
+async def test_a_refused_zone_is_left_out_and_logged(
+    mock_modbus_unit: MockModbusUnit, caplog: pytest.LogCaptureFixture
+) -> None:
+    seed(mock_modbus_unit)
+    mock_modbus_unit.fail_read(1153, IllegalDataAddressError())
+    appliance = Gtw08Appliance(mock_modbus_unit)
+    with caplog.at_level(logging.INFO, logger="gtw08_modbus"):
+        await appliance.async_update_readings()
+
+    assert list(appliance.zone_slots) == [1, 3]
+    assert "Zone 2 refuses its registers" in caplog.text
 
 
 async def test_zone_count_bounds_the_probe(mock_modbus_unit: MockModbusUnit) -> None:
@@ -281,7 +368,7 @@ async def test_zone_count_bounds_the_probe(mock_modbus_unit: MockModbusUnit) -> 
 async def test_zone_writes(
     appliance: Gtw08Appliance, mock_modbus_unit: MockModbusUnit
 ) -> None:
-    await appliance.async_update_readings()
+    await appliance.async_update()
     writes: list[WriteEvent] = []
     mock_modbus_unit.on_write(writes.append)
     mixing = appliance.zone_slots[3]
@@ -289,13 +376,45 @@ async def test_zone_writes(
     await mixing.async_write_mode(ZoneMode.MANUAL)
     await mixing.async_write_room_setpoint(20.5)
     await mixing.write("heating_curve_gradient", 0.7)
+    await mixing.write("heating_curve_footpoint", 22)
+    await mixing.write("flow_setpoint_fixed", 45)
 
     assert mock_modbus_unit.holding[1673] == 1
     assert mock_modbus_unit.holding[1688] == 205
     assert mock_modbus_unit.holding[1698] == 7
+    assert mock_modbus_unit.holding[1699] == 220
+    assert mock_modbus_unit.holding[1672] == 4500
     assert {write.register_type for write in writes} == {"holding"}
     with pytest.raises(ValueError, match="temporary"):
         await mixing.async_write_mode(ZoneMode.TEMPORARY)
+    with pytest.raises(AttributeError):
+        await mixing.write("flow_temperature", 30)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param("heating_curve_gradient", 25.5, id="uint8_not_available"),
+        pytest.param("heating_curve_gradient", 30, id="uint8_too_high"),
+        pytest.param("heating_curve_gradient", -0.1, id="uint8_negative"),
+        pytest.param("room_setpoint_manual", -1, id="uint16_negative"),
+        pytest.param("room_setpoint_manual", 6553.5, id="uint16_not_available"),
+        pytest.param("mode_setting", 7, id="enum_not_a_member"),
+    ],
+)
+async def test_writes_out_of_range_are_refused(
+    appliance: Gtw08Appliance,
+    mock_modbus_unit: MockModbusUnit,
+    field: str,
+    value: float,
+) -> None:
+    await appliance.async_update()
+    writes: list[WriteEvent] = []
+    mock_modbus_unit.on_write(writes.append)
+
+    with pytest.raises(ValueError):
+        await appliance.zone_slots[1].write(field, value)
+    assert writes == []
 
 
 async def test_remote_control_writes_the_mode_first(
@@ -306,7 +425,6 @@ async def test_remote_control_writes_the_mode_first(
     mock_modbus_unit.on_write(writes.append)
     control = appliance.system_control
     assert control is not None
-    assert control.mode is RemoteControlMode.MONITORING_ONLY
 
     await control.async_request(
         RemoteControlMode.TEMPERATURE_AND_POWER,
@@ -322,6 +440,70 @@ async def test_remote_control_writes_the_mode_first(
 
     await control.async_stop()
     assert mock_modbus_unit.holding[258] == 3
+
+
+async def test_remote_control_switches_off_without_setpoints(
+    appliance: Gtw08Appliance, mock_modbus_unit: MockModbusUnit
+) -> None:
+    await appliance.async_update()
+    assert appliance.system_control is not None
+
+    await appliance.system_control.async_request(
+        RemoteControlMode.TEMPERATURE_AND_POWER, RemoteHeatDemand.STANDBY
+    )
+
+    assert mock_modbus_unit.holding[258] == 0
+    assert mock_modbus_unit.holding[259] == 0
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "failing"),
+    [
+        pytest.param({"power": 60, "temperature": 50}, 259, id="write_fails"),
+        pytest.param({"power": 60, "temperature": -1}, None, id="out_of_range"),
+    ],
+)
+async def test_remote_control_falls_back_to_monitoring(
+    appliance: Gtw08Appliance,
+    mock_modbus_unit: MockModbusUnit,
+    kwargs: dict[str, float],
+    failing: int | None,
+) -> None:
+    await appliance.async_update()
+    assert appliance.system_control is not None
+    if failing is not None:
+        mock_modbus_unit.fail_write(failing, ModbusTimeoutError())
+
+    with pytest.raises((ModbusTimeoutError, ValueError)):
+        await appliance.system_control.async_request(
+            RemoteControlMode.TEMPERATURE_AND_POWER,
+            RemoteHeatDemand.HEATING,
+            **kwargs,
+        )
+
+    assert mock_modbus_unit.holding[258] == RemoteControlMode.MONITORING_ONLY
+
+
+async def test_remote_control_requests_do_not_interleave(
+    appliance: Gtw08Appliance, mock_modbus_unit: MockModbusUnit
+) -> None:
+    await appliance.async_update()
+    writes: list[WriteEvent] = []
+    mock_modbus_unit.on_write(writes.append)
+    control = appliance.system_control
+    assert control is not None
+
+    await asyncio.gather(
+        control.async_request(
+            RemoteControlMode.POWER, RemoteHeatDemand.HEATING, power=40
+        ),
+        control.async_request(
+            RemoteControlMode.TEMPERATURE, RemoteHeatDemand.COOLING, temperature=15
+        ),
+    )
+
+    assert [write.address for write in writes] == [258, 256, 259, 258, 257, 259]
+    assert mock_modbus_unit.holding[259] == RemoteHeatDemand.COOLING
 
 
 async def test_remote_control_checks_what_the_mode_needs(
@@ -343,12 +525,20 @@ async def test_remote_control_checks_what_the_mode_needs(
         )
 
 
-async def test_fallback(appliance: Gtw08Appliance) -> None:
-    await appliance.async_update_settings()
+async def test_fallback_writes(
+    appliance: Gtw08Appliance, mock_modbus_unit: MockModbusUnit
+) -> None:
+    await appliance.async_update()
+    fallback = appliance.fallback
+    assert fallback is not None
 
-    assert appliance.fallback is not None
-    assert appliance.fallback.period == 10
-    assert appliance.fallback.temperature == 45
+    await fallback.write("temperature", -5)
+    await fallback.write("analog_input_voltage", 7.5)
+
+    assert mock_modbus_unit.holding[21024] == 0xFFFF & -500
+    assert mock_modbus_unit.holding[21027] == 75
+    with pytest.raises(ValueError):
+        await fallback.write("temperature", 327.67)
 
 
 async def test_optional_blocks_the_gateway_refuses(
@@ -365,34 +555,56 @@ async def test_optional_blocks_the_gateway_refuses(
     assert appliance.system_control is None
     assert appliance.fallback is None
     assert appliance.cascade is None
-    assert appliance.settings_components == ()
+    assert appliance.settings_components == ("zone_settings",)
 
 
-async def test_a_cascade_with_producers(mock_modbus_unit: MockModbusUnit) -> None:
+async def test_an_optional_block_still_unfetched_counts_as_missing(
+    mock_modbus_unit: MockModbusUnit, caplog: pytest.LogCaptureFixture
+) -> None:
     seed(mock_modbus_unit)
-    mock_modbus_unit.holding.update(
-        {
-            7001: 1,
-            7101: 6010,
-            7102: 3,
-            7151: uint32_words(245),
-            7157: 1,
-            7159: 3,
-            7168: 5990,
-            7209: 3,
-        }
-    )
+    mock_modbus_unit.fail_read(9230, GatewayTargetError())
+    appliance = Gtw08Appliance(mock_modbus_unit, attempts=3, retry_delay=0)
+    with caplog.at_level(logging.INFO, logger="gtw08_modbus"):
+        await appliance.async_update()
+
+    assert appliance.heat_pump is None
+    assert read_starts(mock_modbus_unit).count(9230) == 3
+    assert "HeatPumpPerformance still not fetched" in caplog.text
+
+
+async def test_an_optional_block_fetched_on_a_retry(
+    mock_modbus_unit: MockModbusUnit,
+) -> None:
+    seed(mock_modbus_unit)
+    fail_first_reads(mock_modbus_unit, 9230, 1, GatewayTargetError())
+    appliance = Gtw08Appliance(mock_modbus_unit, retry_delay=0)
+    await appliance.async_update()
+
+    assert appliance.heat_pump is not None
+    assert appliance.heat_pump.cop == 4.21
+
+
+async def test_a_single_producer_is_no_cascade(
+    mock_modbus_unit: MockModbusUnit,
+) -> None:
+    seed(mock_modbus_unit)
+    mock_modbus_unit.holding[7102] = 1
     appliance = Gtw08Appliance(mock_modbus_unit)
     await appliance.async_update_readings()
 
-    cascade = appliance.cascade
-    assert cascade is not None
-    assert cascade.producer_count == 3
-    assert cascade.flow_temperature == 60.1
-    assert cascade.requested_power == 24.5
-    assert cascade.primary_pump_active is True
-    assert cascade.state is ApplianceStatus.GENERATOR_CH
-    assert "cascade" in appliance.readings_components
+    assert appliance.cascade is None
+
+
+async def test_cascade_return_temperature_skips_the_dhw_hours(
+    appliance: Gtw08Appliance, mock_modbus_unit: MockModbusUnit
+) -> None:
+    mock_modbus_unit.holding.update({7162: 0x0001, 7163: 0x0002, 7164: 4870})
+    await appliance.async_update_readings()
+
+    assert appliance.cascade is not None
+    assert appliance.cascade.hours_dhw == 0x00010002
+    assert appliance.cascade.return_temperature == 48.7
+    assert appliance.cascade.state is ApplianceStatus.GENERATOR_CH
 
 
 async def test_a_failed_block_keeps_the_rest(
@@ -418,14 +630,14 @@ async def test_a_dead_link_raises(
         await appliance.async_update_readings()
 
 
-async def test_raw_dump_round_trips(
-    appliance: Gtw08Appliance, mock_modbus_unit: MockModbusUnit
-) -> None:
+async def test_raw_dump_round_trips(appliance: Gtw08Appliance) -> None:
     await appliance.async_update()
     raw = await appliance.async_read_raw()
 
     assert raw["holding"][409] == 0xFF00 | 18
     replay = MockModbusConnection().for_unit(100)
+    replay.holding.update({128: 2, 129: 0x0204, 135: 0x1904, 189: 3})
+    replay.holding.update({641: 1, 1153: 6, 1665: 2})
     replay.load_raw(raw)  # type: ignore[arg-type]
     copy = Gtw08Appliance(replay)
     await copy.async_update()

@@ -38,6 +38,8 @@ def print_appliance(appliance: Gtw08Appliance) -> None:
             print_component(component, title=name)
             print()
     print(f"serial_number  {appliance.serial_number}")
+    print(f"board_count    {appliance.board_count}")
+    print(f"zone_count     {appliance.zone_count}")
     for board in appliance.board_list:
         title = f"board_{board.number}"
         print(f"\n{title}\n{'-' * len(title)}")
@@ -46,8 +48,10 @@ def print_appliance(appliance: Gtw08Appliance) -> None:
         print(f"  error_code  {board.error_code}")
         print(f"  error_type  {board.error_type}")
     for number, zone in appliance.zone_slots.items():
+        print(f"\nzone_{number}  function {zone.function_code} ({zone.function})")
+        print_component(zone.readings, title=f"zone_{number}_readings")
         print()
-        print_component(zone, title=f"zone_{number}")
+        print_component(zone.settings, title=f"zone_{number}_settings")
     for name in ("cascade", "system_control", "fallback"):
         if (component := getattr(appliance, name)) is not None:
             print()

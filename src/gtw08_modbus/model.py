@@ -3,14 +3,22 @@
 The manual numbers registers by their protocol address, so a field takes the
 manual's number as is. Each helper below matches one of the manual's data
 types and decodes the value the gateway sends for "not available" to ``None``.
+The manual documents none of these values. They are the conventions of the
+data types.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from enum import IntEnum, IntFlag
 from typing import Any, overload
 
-from modbus_connection.model import Component, NumberField, UpdateReport
+from modbus_connection.model import (
+    Component,
+    NumberField,
+    UpdateReport,
+    WriteValidator,
+)
 
 __all__ = [
     "Gtw08Component",
@@ -53,6 +61,34 @@ class LowByteField[T](NumberField[T]):
         return super().decode([words[0] & 0xFF], scale_exponent)
 
 
+def _in_range(low: int, high: int, scale: float) -> WriteValidator:
+    """Reject a value whose raw form falls outside ``low`` to ``high``.
+
+    The bounds leave out the "not available" values, so a write can never
+    send one.
+    """
+
+    def validate(value: Any) -> Any:
+        raw = round(float(value) / scale)
+        if not low <= raw <= high:
+            raise ValueError(f"{value} is outside {low * scale:g} to {high * scale:g}")
+        return value
+
+    return validate
+
+
+def _member_of(enum_type: type[IntEnum]) -> WriteValidator:
+    """Reject a value that is not a member of ``enum_type``."""
+
+    def validate(value: Any) -> Any:
+        try:
+            return enum_type(int(value))
+        except ValueError:
+            raise ValueError(f"{value} is not a {enum_type.__name__}") from None
+
+    return validate
+
+
 def int16(
     address: int,
     scale: float = 1.0,
@@ -67,7 +103,7 @@ def int16(
         signed=True,
         nan=INT16_NOT_AVAILABLE,
         unit=unit,
-        writable=writable,
+        writable=_in_range(-0x7FFF, 0x7FFE, scale) if writable else False,
         force_fc16=writable,
     )
 
@@ -109,7 +145,7 @@ def uint16(
         nan=UINT16_NOT_AVAILABLE,
         unit=unit,
         stride=stride,
-        writable=writable,
+        writable=_in_range(0, UINT16_NOT_AVAILABLE - 1, scale) if writable else False,
         force_fc16=writable,
     )
 
@@ -181,22 +217,30 @@ def uint8(
         signed=False,
         nan=UINT8_NOT_AVAILABLE,
         unit=unit,
-        writable=writable,
+        writable=_in_range(0, UINT8_NOT_AVAILABLE - 1, scale) if writable else False,
         force_fc16=writable,
     )
 
 
 def enum8[E: IntEnum](
-    address: int, enum_type: type[E], *, writable: bool = False, stride: int = 0
+    address: int,
+    enum_type: type[E],
+    *,
+    writable: bool = False,
+    stride: int = 0,
+    nan: int | Iterable[int] | None = UINT8_NOT_AVAILABLE,
 ) -> LowByteField[E]:
-    """An ENUM8 value in the low byte of a register."""
+    """An ENUM8 value in the low byte of a register.
+
+    Pass ``nan=None`` for an enum that uses 255 as a real value.
+    """
     return LowByteField(
         address,
         signed=False,
         convert=enum_type,
-        nan=UINT8_NOT_AVAILABLE,
+        nan=nan,
         stride=stride,
-        writable=writable,
+        writable=_member_of(enum_type) if writable else False,
         force_fc16=writable,
     )
 

@@ -41,28 +41,38 @@ def board_model(device_type: int | None) -> str | None:
 
 
 class BoardSummary(Gtw08Component):
-    """How many boards there are and whether any reports an error."""
+    """How many boards and zones the appliance has. Read once, at setup."""
 
     board_count = uint8(128)
     """How many control boards are connected, 0 to 16."""
     zone_count = uint8(189)
     """How many zones the appliance detected."""
+
+
+class ErrorSummary(Gtw08Component):
+    """Whether any board reports an error."""
+
     any_error = bool8(531)
-    """At least one board reports an error."""
+
+
+class BoardType(Gtw08Component):
+    """A board's device type. Read once, at setup."""
+
+    device_type = raw_register(129, stride=6)
+    """The category in the high byte and the number in it in the low byte."""
 
 
 class Board(Gtw08Component):
     """One of the first eight control boards, numbered from 1."""
 
-    def __init__(self, unit: ModbusUnit, number: int) -> None:
+    def __init__(self, unit: ModbusUnit, number: int, device_type: int | None) -> None:
         """Place the board's fields at its own addresses."""
         if not 1 <= number <= BOARD_COUNT:
             raise ValueError(f"no board {number}")
         super().__init__(unit, index=number)
         self.number = number
+        self.device_type = device_type
 
-    device_type = raw_register(129, stride=6)
-    """The category in the high byte and the number in it in the low byte."""
     raw_error_code = raw_register(532, stride=2)
     _error_type = enum8(533, ErrorType, stride=2)
 

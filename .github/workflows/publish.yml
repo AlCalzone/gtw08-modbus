@@ -3,18 +3,17 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
+  # Run it on an existing release tag: gh workflow run publish.yml --ref 0.1.0
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing release tag to build and publish (e.g. 0.1.0)
-        required: true
-        type: string
 
 env:
-  RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+  RELEASE_TAG: ${{ github.event.release.tag_name || github.ref_name }}
 
 jobs:
   build:
+    # A manual run uses the workflow file of the ref it runs on, so only a
+    # tag's copy may publish.
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: read

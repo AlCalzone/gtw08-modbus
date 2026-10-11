@@ -40,7 +40,8 @@ async def main() -> None:
         print("Model:", appliance.model)
         print("Status:", appliance.appliance.status)
         print("Flow:", appliance.appliance.flow_temperature, "°C")
-        await appliance.zone_slots[1].async_write_mode(ZoneMode.MANUAL)
+        for zone in appliance.zone_slots.values():
+            await zone.async_write_mode(ZoneMode.MANUAL)
     finally:
         await connection.close()
 
@@ -58,11 +59,12 @@ Every value is `None` until the first update. Each update returns an `UpdateRepo
 
 ## Gotchas
 
-- **Lazy gateway:** the gateway fetches each value from the appliance the first time it is asked, and answers `GatewayTargetError` until it has it. `async_detect()` retries for this. A later poll can list a component as failed once.
-- **No appliance:** `GatewayPathUnavailableError` means the gateway sees no appliance on its L-Bus.
-- **Remote control:** while `system_control.mode` is anything but `MONITORING_ONLY`, the appliance ignores the heat demand of its zones.
+- **Lazy gateway:** the gateway fetches each value from the appliance the first time it is asked, and answers `GatewayTargetError` until it has it. Setup and `async_detect()` ask again, five times two seconds apart by default. An optional block that never answers is left out. A later poll can list a component as failed once.
+- **Static values:** the board count, zone count, board types and zone functions are read once, at setup. A board or zone added later needs a new `Gtw08Appliance`.
+- **Remote control:** while `system_control.mode` is anything but `MONITORING_ONLY`, the appliance ignores the heat demand of its zones. A failed `async_request()` puts it back to `MONITORING_ONLY`.
 - **Missing values:** a value the appliance does not have, such as the flue gas temperature of a heat pump, stays `None`.
-- **Testing:** built from the manufacturer's configuration manual 7854678 (September 2023) and tested against modbus-connection's mock. It has not been tested on real hardware.
+- **Write ranges:** a write outside the field's range, or one that would send a "not available" value, raises `ValueError` before anything is sent.
+- **Testing:** built from the manufacturer's configuration manual 7854678 (September 2023) and tested against modbus-connection's mock. It has not been tested on real hardware. These readings of the manual still need a real gateway to confirm: the "not available" values, the zone function codes, the 512-register zone step, whether service hours count in steps of 2, and how the gateway answers for a block the appliance lacks.
 
 ## API
 
@@ -70,20 +72,22 @@ Every value is `None` until the first update. Each update returns an `UpdateRepo
 
 The appliance behind one GTW-08 gateway. Construction does no I/O.
 
-- `await Gtw08Appliance.async_detect(unit, *, timeout=None)`: build the appliance, set it up and read it once.
+- `await Gtw08Appliance.async_detect(unit, *, timeout=None, attempts=None, retry_delay=None)`: build the appliance, set it up and read it once. It asks again while the gateway is still fetching, 5 times 2 seconds apart unless `attempts` and `retry_delay` say otherwise.
 - `await async_update_readings()`: refresh the measurements, boards, zones and cascade.
-- `await async_update_settings()`: refresh the remote control and fallback settings.
+- `await async_update_settings()`: refresh the remote control, fallback and zone settings.
 - `await async_update()`: refresh both.
 - `await async_read_raw()`: every register read, undecoded.
 - `model`: the main control board, such as `EHC-04`.
 - `serial_number`: the producer serial number, or `None`.
+- `board_count`, `zone_count`: how many boards and zones the appliance reports.
+- `detect_report`: the `UpdateReport` of the last update `async_detect()` ran.
 - `readings_components`, `settings_components`: the names of the components this appliance polls.
 - `summary`, `system_status`, `appliance`, `service`, `board_list`, `heat_pump`, `zone_slots`, `cascade`, `system_control`, `fallback`: the components below.
 
-### `summary` (`BoardSummary`)
+The constructor also takes `attempts` and `retry_delay`, with the same meaning as in `async_detect()`.
 
-- `board_count`: how many control boards are connected.
-- `zone_count`: how many zones the appliance detected.
+### `summary` (`ErrorSummary`)
+
 - `any_error`: at least one board reports an error.
 
 ### `system_status` (`SystemStatus`)
@@ -138,10 +142,11 @@ Optional. Present when the appliance serves it, which heat pumps do.
 
 ### `zone_slots` (`dict[int, Zone]`)
 
-Zones by number, from 1. Only zones with a function are listed.
+Zones by number, from 1. Only zones with a function are listed. Each `Zone` reads through three components: `config` once at setup, `readings` with the readings and `settings` with the settings.
 
 - `number`: the zone's number.
-- `function`: what the zone heats (`ZoneFunction`), with `is_dhw` and `is_room_heating`.
+- `function_code`: the zone's function as the appliance reports it.
+- `function`: what the zone heats (`ZoneFunction`), with `is_dhw` and `is_room_heating`, or `None` for a code the manual does not list.
 - `device_type`: the board that drives the zone.
 - `flow_temperature`: the flow temperature, or the tank temperature of a hot water zone, in °C.
 - `flow_setpoint`: the flow setpoint in effect, in °C.
@@ -225,9 +230,10 @@ Optional. Present when the gateway serves it. Every field is writable.
 
 ### Errors
 
-- `NoApplianceError`: setup finds no control board behind the gateway.
-- `GatewayTargetError` (from modbus-connection): `async_detect()` ran out of retries while the gateway was still fetching.
-- `ValueError`: `async_write_mode(ZoneMode.TEMPORARY)`, or `async_request()` without the power or temperature its mode needs.
+- `NoApplianceError`: setup finds no control board, or the gateway sees no appliance on its L-Bus. It is a `ModbusError`.
+- `GatewayTargetError` (from modbus-connection): setup ran out of attempts while the gateway was still fetching a required register.
+- `ModbusTimeoutError` (from modbus-connection): the gateway did not answer. Setup raises it, and a poll raises it when no component answers.
+- `ValueError`: a write out of range, `async_write_mode(ZoneMode.TEMPORARY)`, or `async_request()` without the power or temperature its mode needs.
 
 The register addresses are in the component modules under [`src/gtw08_modbus`](src/gtw08_modbus), taken from the manufacturer's configuration manual 7854678.
 

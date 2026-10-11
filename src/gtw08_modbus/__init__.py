@@ -1,7 +1,7 @@
 """Read and control heating appliances behind a GTW-08 Modbus gateway."""
 
 from .appliance import Appliance, HeatPumpPerformance, Service, SystemStatus
-from .boards import Board, BoardSummary, board_model
+from .boards import Board, BoardSummary, BoardType, ErrorSummary, board_model
 from .cascade import Cascade, ProducerSerial
 from .control import Fallback, SystemControl
 from .device import (
@@ -36,7 +36,7 @@ from .enums import (
     ZoneMode,
 )
 from .model import Gtw08Component, UpdateReport
-from .zone import Zone
+from .zone import Zone, ZoneConfig, ZoneReadings, ZoneSettings
 
 __all__ = [
     "DEFAULT_UNIT_ID",
@@ -49,11 +49,13 @@ __all__ = [
     "Board",
     "BoardCategory",
     "BoardSummary",
+    "BoardType",
     "Cascade",
     "CascadeHeatDemand",
     "CascadeManagement",
     "CascadeMode",
     "CascadeType",
+    "ErrorSummary",
     "ErrorType",
     "Fallback",
     "FallbackConfiguration",
@@ -77,7 +79,10 @@ __all__ = [
     "UpdateReport",
     "Zone",
     "ZoneActivity",
+    "ZoneConfig",
     "ZoneFunction",
     "ZoneMode",
+    "ZoneReadings",
+    "ZoneSettings",
     "board_model",
 ]

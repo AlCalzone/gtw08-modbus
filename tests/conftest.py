@@ -29,7 +29,8 @@ SERIAL_NUMBER = 2312345678
 
 # An EHC-04 heat pump with an SCB-04, as in the manual's table 31: zone 1 a
 # direct circuit and zone 2 the hot water tank on the EHC-04, zone 3 a mixing
-# circuit on the SCB-04.
+# circuit on the SCB-04. It leads a cascade of three producers. Every counter
+# holds a different value, so a field read at the wrong address shows up.
 HOLDING: dict[int, int | list[int]] = {
     # -- remote control: monitoring only --
     256: 0,
@@ -39,7 +40,7 @@ HOLDING: dict[int, int | list[int]] = {
     # -- system status --
     272: 45,
     275: 0b1000001,  # direct zones allowed, heat engine active
-    277: 0,
+    277: 0x1234,
     279: 0b00000010,  # heat pump on
     280: 0b0100001,  # pump on, central heating active
     384: int16(-350),  # -3.5 °C
@@ -62,23 +63,23 @@ HOLDING: dict[int, int | list[int]] = {
     411: 3,  # running for central heating
     412: 30,
     413: 62,
-    419: uint32_words(1234),
-    421: uint32_words(5678),
-    423: uint32_words(12),
-    425: uint32_words(34),
-    427: uint32_words(0),
-    429: uint32_words(0),
-    431: uint32_words(20000),
-    433: uint32_words(3100),
-    435: uint32_words(900),
-    437: uint32_words(50),
-    439: uint32_words(4050),
-    441: uint32_words(120),
-    443: uint32_words(13200),
-    445: uint32_words(10100),
-    447: uint32_words(2900),
-    449: uint32_words(200),
-    451: uint32_words(110),
+    419: uint32_words(1001),
+    421: uint32_words(1002),
+    423: uint32_words(1003),
+    425: uint32_words(1004),
+    427: uint32_words(1005),
+    429: uint32_words(1006),
+    431: uint32_words(1007),
+    433: uint32_words(1008),
+    435: uint32_words(1009),
+    437: uint32_words(1010),
+    439: uint32_words(1011),
+    441: uint32_words(1012),
+    443: uint32_words(1013),
+    445: uint32_words(1014),
+    447: uint32_words(1015),
+    449: uint32_words(1016),
+    451: uint32_words(1017),
     459: 655,  # 65.5 %
     460: uint32_words(512),  # 5.12 kW
     # -- service --
@@ -90,17 +91,42 @@ HOLDING: dict[int, int | list[int]] = {
     # -- heat pump performance --
     9230: 4210,
     9231: 2500,
+    # -- cascade --
+    7001: 1,
+    7002: 1,
+    7009: 0,
+    7101: 6010,
+    7102: 3,
+    7103: 4,
+    7104: 2,
+    7105: 70,
+    7106: 5500,
+    7107: 7,
+    7108: 65,
+    7109: 5400,
+    7110: 7,
+    7151: uint32_words(245),
+    7155: 655,
+    7157: 1,
+    7158: 0,
+    7159: 3,
+    7160: uint32_words(1200),
+    7162: uint32_words(65538),  # 7163 holds this counter's low word
+    7164: 5020,
+    7168: 5990,
+    7169: 4990,
+    7209: 4,
     # -- serial number --
     7228: uint32_words(SERIAL_NUMBER),
     # -- fallback --
-    21020: 0,
-    21021: 0,
+    21020: 1,
+    21021: 2,
     21022: 10,
     21023: 50,
     21024: 4500,
     21025: 7,
-    21026: 0,
-    21027: 0,
+    21026: 1,
+    21027: 55,
     # -- zones --
     **zone(
         1,
@@ -158,8 +184,8 @@ HOLDING: dict[int, int | list[int]] = {
             1107: 0,
             1108: 2,
             1110: 0,
-            1115: uint32_words(0),
-            1117: uint32_words(0),
+            1115: uint32_words(7),
+            1117: uint32_words(3),
         },
     ),
 }
@@ -173,6 +199,6 @@ def seed(unit: MockModbusUnit, holding: dict[int, int | list[int]] = HOLDING) ->
 
 @pytest.fixture
 def appliance(mock_modbus_unit: MockModbusUnit) -> Gtw08Appliance:
-    """An EHC-04 heat pump with an SCB-04 and three zones."""
+    """An EHC-04 heat pump with an SCB-04, three zones and a cascade."""
     seed(mock_modbus_unit)
-    return Gtw08Appliance(mock_modbus_unit)
+    return Gtw08Appliance(mock_modbus_unit, retry_delay=0)
