@@ -225,14 +225,21 @@ class Gtw08Appliance(Device):
         for number in range(1, last + 1):
             probes[f"zone_{number}"] = self._zone_probe(number)
         for name, probe in probes.items():
+            attempt = 1
             while not await self._async_settle(name, probe):
-                if loop.time() + self._retry_delay > deadline:
+                # The attempt count also bounds the loop, for a clock that
+                # does not move.
+                if (
+                    attempt >= self._attempts
+                    or loop.time() + self._retry_delay > deadline
+                ):
                     _LOGGER.warning(
                         "%s is still not fetched; asking again with every update",
                         name,
                     )
                     self._pending[name] = probe
                     break
+                attempt += 1
                 await asyncio.sleep(self._retry_delay)
 
         _LOGGER.debug(
