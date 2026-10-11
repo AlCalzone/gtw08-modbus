@@ -56,8 +56,8 @@ class SystemControl(Gtw08Component):
         if needs_temperature and temperature is None:
             raise ValueError(f"{mode.name} needs a temperature")
 
-        # The gateway ignores registers 256, 257 and 259 until 258 leaves
-        # monitoring only, so the mode must go first.
+        # The mode must go first because the gateway ignores registers 256, 257
+        # and 259 until 258 leaves monitoring only.
         await self.write("mode", mode)
         if power is not None:
             await self.write("power", power)

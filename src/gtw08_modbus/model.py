@@ -36,7 +36,7 @@ class Gtw08Component(Component):
     """A sub-system of the GTW-08 register map.
 
     Reads cover only the registers the manual documents. Neighbouring
-    registers merge into one read, and a gap splits it.
+    registers merge into one read. A gap splits it.
     """
 
     max_gap = 1

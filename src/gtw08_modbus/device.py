@@ -26,7 +26,7 @@ DEFAULT_UNIT_ID = 100
 """The gateway's address with its rotary dial at 0. Positions 1 to F add 1 to 15."""
 
 # The gateway answers a register it has not fetched from the appliance yet
-# with exception 0x0B, and has it on the next try.
+# with exception 0x0B. It has the value on a later try.
 DETECT_ATTEMPTS = 5
 DETECT_RETRY_DELAY = 2.0
 
