@@ -1035,3 +1035,54 @@ async def test_fallback_writes_refuse(
     with pytest.raises(InvalidValueError):
         await appliance.fallback.write(field, value)
     assert writes == []
+
+
+async def test_a_dead_link_costs_one_pending_timeout(
+    mock_modbus_unit: MockModbusUnit,
+) -> None:
+    seed(mock_modbus_unit)
+    pending = (9230, 256, 21020)
+    for address in pending:
+        mock_modbus_unit.fail_read(address, GatewayTargetError())
+    appliance = Gtw08Appliance(mock_modbus_unit, retry_delay=0)
+    await appliance.async_update()
+    assert len(appliance.pending_blocks) == 3
+    mock_modbus_unit.fail_requests(ModbusTimeoutError())
+    mock_modbus_unit.read_events.clear()
+
+    with pytest.raises(ModbusTimeoutError):
+        await appliance.async_update_readings()
+
+    asked = [address for address in read_starts(mock_modbus_unit) if address in pending]
+    assert asked == [9230]
+    assert len(appliance.pending_blocks) == 3
+
+
+async def test_a_cancel_during_the_rollback_reaches_the_caller(
+    appliance: Gtw08Appliance, mock_modbus_unit: MockModbusUnit
+) -> None:
+    await appliance.async_update()
+    control = appliance.system_control
+    assert control is not None
+    original = mock_modbus_unit.write_registers
+
+    async def write(address: int, values: list[int]) -> None:
+        if address == 257:
+            raise ModbusTimeoutError()
+        if address == 258 and values == [3]:
+            await asyncio.sleep(0.05)
+        await original(address, values)
+
+    mock_modbus_unit.write_registers = write  # type: ignore[method-assign]
+    task = asyncio.create_task(
+        control.async_request(
+            RemoteControlMode.TEMPERATURE, RemoteHeatDemand.HEATING, temperature=50
+        )
+    )
+    await asyncio.sleep(0.01)
+    task.cancel()  # during the rollback
+
+    with pytest.raises(asyncio.CancelledError) as err:
+        await task
+    assert isinstance(err.value.__cause__, ModbusTimeoutError)
+    assert mock_modbus_unit.holding[258] == RemoteControlMode.MONITORING_ONLY

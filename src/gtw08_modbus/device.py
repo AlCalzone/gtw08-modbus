@@ -13,6 +13,7 @@ from modbus_connection import (
     GatewayTargetError,
     ModbusConnectionError,
     ModbusError,
+    ModbusTimeoutError,
 )
 from modbus_connection.model import (
     ComponentGroup,
@@ -300,10 +301,14 @@ class Gtw08Appliance(Device):
             if pending.skip:
                 pending.skip -= 1
                 continue
+            timed_out = False
             try:
                 settled = await self._async_settle(name, pending.probe)
             except ModbusConnectionError:
                 raise
+            except ModbusTimeoutError as err:
+                _LOGGER.debug("%s timed out: %s", name, err)
+                settled, timed_out = False, True
             except ModbusError as err:
                 _LOGGER.debug("%s did not answer: %s", name, err)
                 settled = False
@@ -313,6 +318,10 @@ class Gtw08Appliance(Device):
                 continue
             pending.misses += 1
             pending.skip = min(2**pending.misses - 1, PENDING_MAX_SKIP)
+            if timed_out:
+                # Stop at the first timeout, so a dead link costs one timeout
+                # here and not one per pending block.
+                break
 
     async def _probe_heat_pump(self) -> bool:
         self.heat_pump = await read_optional(HeatPumpPerformance(self.modbus_unit))

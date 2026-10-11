@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 
 from modbus_connection import ModbusUnit
@@ -92,15 +91,22 @@ class SystemControl(Gtw08Component):
                 if temperature is not None:
                     await self.write("temperature", temperature)
                 await self.write("heat_demand", heat_demand)
-            except BaseException:
+            except BaseException as err:
                 # Roll back a failed mode write too because a write that timed
                 # out may still have reached the gateway. The rollback runs
                 # as its own task and must finish, even if this one is
                 # cancelled again while it waits.
                 rollback = asyncio.create_task(self._async_roll_back())
+                cancelled = False
                 while not rollback.done():
-                    with contextlib.suppress(asyncio.CancelledError):
+                    try:
                         await asyncio.shield(rollback)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                # A cancel that arrived during the rollback must still reach
+                # the caller.
+                if cancelled and not isinstance(err, asyncio.CancelledError):
+                    raise asyncio.CancelledError from err
                 raise
 
     def _validate(self, field: str, value: object) -> None:
