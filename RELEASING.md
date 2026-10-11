@@ -1,24 +1,19 @@
 # Releasing `gtw08-modbus`
 
-This document describes how to release a new version of `gtw08-modbus` to PyPI.
+Publishing a GitHub release publishes the package to PyPI. Nothing else does.
 
-## Tagging Convention
+## Tags
 
-> [!IMPORTANT]
-> **Release tags must be bare semantic versions without a leading `v`** (e.g. `0.1.5`, `1.0.0`).
-> Do not use `v`-prefixed tags like `v0.1.5`.
+Release tags are bare versions without a leading `v`, such as `0.1.5` or `1.0.0`. The workflow writes the tag into `pyproject.toml` as the package version, and the `pypi` environment only accepts tags that match `*.*.*`.
 
-Release tags are directly substituted into `pyproject.toml` during the release workflow to set the package version according to PEP 440.
+## Steps
 
-## Release Process
+1. Check that the `CI` workflow is green on `main`.
+2. On GitHub, go to **Releases** and choose **Draft a new release**.
+3. Create a new tag with the version, such as `0.1.5`, targeting `main`. Use the version as the title, and write the release notes.
+4. Select **Publish release**. This starts the `Publish to PyPI` workflow, which runs the tests and builds the package.
+5. Open the run in the **Actions** tab. The publish job waits for approval in the `pypi` environment. Approve it to upload the package.
 
-1. **Verify CI**: Ensure that the `CI` workflow is green on the `main` branch.
-2. **Draft a GitHub Release**:
-   - Go to GitHub Releases: **Draft a new release**.
-   - **Choose a tag**: Enter the new version number as a bare tag (e.g. `0.1.5`).
-   - **Target**: `main`.
-   - **Title**: Enter the version number (e.g. `0.1.5`).
-   - **Description**: Provide release notes / changelog.
-3. **Publish the Release**:
-   - Click **Publish release**.
-   - The `.github/workflows/publish.yml` workflow will automatically trigger, build the wheel and source distribution, and publish the package to PyPI via Trusted Publishing.
+## PyPI setup
+
+PyPI accepts the upload through trusted publishing. The project's trusted publisher on PyPI must name this repository, the workflow `publish.yml` and the environment `pypi`.
