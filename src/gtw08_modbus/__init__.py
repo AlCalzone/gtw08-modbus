@@ -1,16 +1,10 @@
 """Read and control heating appliances behind a GTW-08 Modbus gateway."""
 
 from .appliance import Appliance, HeatPumpPerformance, Service, SystemStatus
-from .boards import Board, BoardSummary, BoardType, ErrorSummary, board_model
-from .cascade import Cascade, ProducerSerial
+from .boards import Board, ErrorSummary
+from .cascade import Cascade
 from .control import Fallback, SystemControl
-from .device import (
-    DEFAULT_UNIT_ID,
-    READINGS,
-    SETTINGS,
-    Gtw08Appliance,
-    NoApplianceError,
-)
+from .device import DEFAULT_UNIT_ID, Gtw08Appliance
 from .enums import (
     AnalogInputFunction,
     ApplianceStatus,
@@ -35,21 +29,18 @@ from .enums import (
     ZoneFunction,
     ZoneMode,
 )
-from .model import Gtw08Component, UpdateReport
-from .zone import Zone, ZoneConfig, ZoneReadings, ZoneSettings
+from .errors import GatewayNotReadyError, Gtw08Error, NoApplianceError
+from .model import UpdateReport
+from .zone import Zone
 
 __all__ = [
     "DEFAULT_UNIT_ID",
-    "READINGS",
-    "SETTINGS",
     "AnalogInputFunction",
     "Appliance",
     "ApplianceStatus",
     "ApplianceSubStatus",
     "Board",
     "BoardCategory",
-    "BoardSummary",
-    "BoardType",
     "Cascade",
     "CascadeHeatDemand",
     "CascadeManagement",
@@ -60,15 +51,15 @@ __all__ = [
     "Fallback",
     "FallbackConfiguration",
     "FallbackMode",
+    "GatewayNotReadyError",
     "GeneratorStatus",
     "Gtw08Appliance",
-    "Gtw08Component",
+    "Gtw08Error",
     "HeatDemandStatus",
     "HeatDemandType",
     "HeatPumpPerformance",
     "HydraulicStatus",
     "NoApplianceError",
-    "ProducerSerial",
     "RemoteControlMode",
     "RemoteHeatDemand",
     "SeasonMode",
@@ -79,10 +70,6 @@ __all__ = [
     "UpdateReport",
     "Zone",
     "ZoneActivity",
-    "ZoneConfig",
     "ZoneFunction",
     "ZoneMode",
-    "ZoneReadings",
-    "ZoneSettings",
-    "board_model",
 ]

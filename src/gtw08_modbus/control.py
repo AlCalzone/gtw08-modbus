@@ -95,3 +95,39 @@ class Fallback(Gtw08Component):
     """Display code EP014: what the smart control board's 0-10 V input controls."""
     analog_input_voltage = uint8(21027, 0.1, unit="V", writable=True)
     """Display code AM028."""
+
+    async def async_write_mode(self, mode: FallbackMode) -> None:
+        """Follow the controlling system, or the fallback heat demand."""
+        await self.write("mode", mode)
+
+    async def async_write_configuration(
+        self, configuration: FallbackConfiguration
+    ) -> None:
+        """Set what happens when the controlling system goes quiet."""
+        await self.write("configuration", configuration)
+
+    async def async_write_period(self, minutes: int) -> None:
+        """Set how long the controlling system may stay quiet."""
+        await self.write("period", minutes)
+
+    async def async_write_power(self, power: float) -> None:
+        """Set the fallback power, in percent."""
+        await self.write("power", power)
+
+    async def async_write_temperature(self, temperature: float) -> None:
+        """Set the fallback temperature, in °C."""
+        await self.write("temperature", temperature)
+
+    async def async_write_heat_demand(self, heat_demand: HeatDemandType) -> None:
+        """Set the kind of fallback heat demand."""
+        await self.write("heat_demand", heat_demand)
+
+    async def async_write_analog_input_function(
+        self, function: AnalogInputFunction
+    ) -> None:
+        """Set what the 0-10 V input controls."""
+        await self.write("analog_input_function", function)
+
+    async def async_write_analog_input_voltage(self, voltage: float) -> None:
+        """Set the value of the 0-10 V input, in V."""
+        await self.write("analog_input_voltage", voltage)

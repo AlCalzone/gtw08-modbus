@@ -5,10 +5,10 @@ Read and control Remeha, Brötje, De Dietrich and Baxi heat pumps and boilers th
 ## Installation
 
 ```bash
-pip install gtw08-modbus
+pip install gtw08-modbus "modbus-connection[tmodbus]"
 ```
 
-It needs Python 3.12 or later and [modbus-connection](https://github.com/home-assistant-libs/modbus-connection) 4.12.4 or later.
+It needs Python 3.12 or later and [modbus-connection](https://github.com/home-assistant-libs/modbus-connection) 4.12.4 or later. The examples use its tmodbus backend, which `modbus-connection[tmodbus]` installs.
 
 ## Device setup
 
@@ -158,12 +158,14 @@ Zones by number, from 1. Only zones with a function are listed. Each `Zone` read
 - `pump_starts`: pump start counter.
 - `mode_setting`: the operating mode set (`ZoneMode`). Writable.
 - `room_setpoint_manual`: the room temperature held in manual mode, in °C. Writable.
-- `heating_curve_gradient`: writable.
-- `heating_curve_footpoint`: in °C. Writable.
+- `heating_curve_gradient`: the gradient of the heating curve. Writable.
+- `heating_curve_footpoint`: the comfort footpoint of the heating curve, in °C. Writable.
 - `flow_setpoint_fixed`: the flow temperature of a fixed-flow zone, in °C. Writable.
 - `await async_write_mode(mode)`: set `SCHEDULING`, `MANUAL` or `OFF`.
 - `await async_write_room_setpoint(temperature)`: set the manual room temperature.
-- `await write(name, value)`: write any writable field by name.
+- `await async_write_heating_curve_gradient(gradient)`: set the heating curve gradient.
+- `await async_write_heating_curve_footpoint(temperature)`: set the heating curve footpoint.
+- `await async_write_flow_setpoint_fixed(temperature)`: set the fixed flow temperature.
 
 ### `cascade` (`Cascade`)
 
@@ -205,6 +207,7 @@ Optional. Present when the gateway serves it. Every field is writable.
 - `heat_demand`: the fallback demand (`HeatDemandType`).
 - `analog_input_function`: what the 0-10 V input controls (`AnalogInputFunction`).
 - `analog_input_voltage`: in V.
+- `await async_write_mode(mode)`, `await async_write_configuration(configuration)`, `await async_write_period(minutes)`, `await async_write_power(power)`, `await async_write_temperature(temperature)`, `await async_write_heat_demand(heat_demand)`, `await async_write_analog_input_function(function)`, `await async_write_analog_input_voltage(voltage)`: write one field each.
 
 ### Enums
 
@@ -230,7 +233,10 @@ Optional. Present when the gateway serves it. Every field is writable.
 
 ### Errors
 
-- `NoApplianceError`: setup finds no control board, or the gateway sees no appliance on its L-Bus. It is a `ModbusError`.
+All errors the library raises itself derive from `Gtw08Error`. Transport and device errors come from modbus-connection.
+
+- `NoApplianceError`: setup finds no control board, or the gateway sees no appliance on its L-Bus.
+- `GatewayNotReadyError`: the gateway still had no board count after the last attempt.
 - `GatewayTargetError` (from modbus-connection): setup ran out of attempts while the gateway was still fetching a required register.
 - `ModbusTimeoutError` (from modbus-connection): the gateway did not answer. Setup raises it, and a poll raises it when no component answers.
 - `ValueError`: a write out of range, `async_write_mode(ZoneMode.TEMPORARY)`, or `async_request()` without the power or temperature its mode needs.

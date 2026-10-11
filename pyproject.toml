@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
 [project]
@@ -24,14 +24,16 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Home Automation",
 ]
-# The caller injects a ModbusUnit; tmodbus is the backend this is exercised against.
-dependencies = ["modbus-connection[tmodbus]>=4.12.4,<5"]
+# The caller passes in a ModbusUnit on a connection it opened with a backend of
+# its choice.
+dependencies = ["modbus-connection>=4.12.4,<5"]
 
 [project.urls]
 Homepage = "https://github.com/AlCalzone/gtw08-modbus"
 
 [dependency-groups]
 dev = [
+    "modbus-connection[tmodbus]>=4.12.4,<5",
     "mypy>=1.11",
     "pytest>=8",
     "pytest-asyncio>=0.24",

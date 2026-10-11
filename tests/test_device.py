@@ -9,24 +9,29 @@ from modbus_connection import (
     GatewayTargetError,
     IllegalDataAddressError,
     ModbusConnectionError,
-    ModbusError,
     ModbusTimeoutError,
 )
 from modbus_connection.mock import MockModbusConnection, MockModbusUnit, WriteEvent
 
 from gtw08_modbus import (
+    AnalogInputFunction,
     ApplianceStatus,
     ApplianceSubStatus,
     BoardCategory,
     ErrorType,
+    FallbackConfiguration,
+    FallbackMode,
+    GatewayNotReadyError,
     Gtw08Appliance,
+    Gtw08Error,
+    HeatDemandType,
     NoApplianceError,
     RemoteControlMode,
     RemoteHeatDemand,
     ZoneFunction,
     ZoneMode,
-    board_model,
 )
+from gtw08_modbus.boards import board_model
 
 from .conftest import SERIAL_NUMBER, seed
 
@@ -142,7 +147,7 @@ async def test_an_empty_l_bus_is_no_appliance(
 
     with pytest.raises(NoApplianceError) as err:
         await Gtw08Appliance.async_detect(mock_modbus_unit)
-    assert isinstance(err.value, ModbusError)
+    assert isinstance(err.value, Gtw08Error)
 
 
 async def test_setup_rejects_a_gateway_without_boards(
@@ -159,7 +164,7 @@ async def test_an_unknown_board_count_is_not_ready_yet(
     mock_modbus_unit.holding[128] = 0xFF
     appliance = Gtw08Appliance(mock_modbus_unit)
 
-    with pytest.raises(GatewayTargetError):
+    with pytest.raises(GatewayNotReadyError):
         await appliance.async_update()
 
     mock_modbus_unit.holding[128] = 2
@@ -170,6 +175,25 @@ async def test_requires_the_callers_timeout(mock_modbus_unit: MockModbusUnit) ->
     Gtw08Appliance(mock_modbus_unit, timeout=3)
 
     assert mock_modbus_unit.required_timeout == 3
+
+
+async def test_leaves_the_timeout_alone_without_one(
+    mock_modbus_unit: MockModbusUnit,
+) -> None:
+    mock_modbus_unit.require_timeout(7)
+    Gtw08Appliance(mock_modbus_unit)
+
+    assert mock_modbus_unit.required_timeout == 7
+
+
+async def test_detect_retries_until_the_board_count_arrives(
+    mock_modbus_unit: MockModbusUnit,
+) -> None:
+    seed(mock_modbus_unit)
+    mock_modbus_unit.holding[128] = 0xFF
+
+    with pytest.raises(GatewayNotReadyError):
+        await Gtw08Appliance.async_detect(mock_modbus_unit, attempts=2, retry_delay=0)
 
 
 async def test_setup_runs_once_for_concurrent_updates(
@@ -375,9 +399,9 @@ async def test_zone_writes(
 
     await mixing.async_write_mode(ZoneMode.MANUAL)
     await mixing.async_write_room_setpoint(20.5)
-    await mixing.write("heating_curve_gradient", 0.7)
-    await mixing.write("heating_curve_footpoint", 22)
-    await mixing.write("flow_setpoint_fixed", 45)
+    await mixing.async_write_heating_curve_gradient(0.7)
+    await mixing.async_write_heating_curve_footpoint(22)
+    await mixing.async_write_flow_setpoint_fixed(45)
 
     assert mock_modbus_unit.holding[1673] == 1
     assert mock_modbus_unit.holding[1688] == 205
@@ -532,13 +556,27 @@ async def test_fallback_writes(
     fallback = appliance.fallback
     assert fallback is not None
 
-    await fallback.write("temperature", -5)
-    await fallback.write("analog_input_voltage", 7.5)
+    await fallback.async_write_mode(FallbackMode.BMS)
+    await fallback.async_write_configuration(FallbackConfiguration.NEVER_CANCEL)
+    await fallback.async_write_period(15)
+    await fallback.async_write_power(80)
+    await fallback.async_write_temperature(-5)
+    await fallback.async_write_heat_demand(HeatDemandType.COOLING)
+    await fallback.async_write_analog_input_function(AnalogInputFunction.POWER)
+    await fallback.async_write_analog_input_voltage(7.5)
 
-    assert mock_modbus_unit.holding[21024] == 0xFFFF & -500
-    assert mock_modbus_unit.holding[21027] == 75
+    assert [mock_modbus_unit.holding[address] for address in range(21020, 21028)] == [
+        0,
+        1,
+        15,
+        80,
+        0xFFFF & -500,
+        8,
+        2,
+        75,
+    ]
     with pytest.raises(ValueError):
-        await fallback.write("temperature", 327.67)
+        await fallback.async_write_temperature(327.67)
 
 
 async def test_optional_blocks_the_gateway_refuses(

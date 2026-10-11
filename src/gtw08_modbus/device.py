@@ -7,11 +7,7 @@ import logging
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Self
 
-from modbus_connection import (
-    GatewayPathUnavailableError,
-    GatewayTargetError,
-    ModbusError,
-)
+from modbus_connection import GatewayPathUnavailableError, GatewayTargetError
 from modbus_connection.model import (
     Component,
     ComponentGroup,
@@ -24,6 +20,7 @@ from .appliance import Appliance, HeatPumpPerformance, Service, SystemStatus
 from .boards import BOARD_COUNT, Board, BoardSummary, BoardType, ErrorSummary
 from .cascade import Cascade, ProducerSerial
 from .control import Fallback, SystemControl
+from .errors import GatewayNotReadyError, NoApplianceError
 from .model import UpdateReport
 from .zone import ZONE_COUNT, Zone
 
@@ -53,10 +50,6 @@ READINGS = (
 SETTINGS = ("system_control", "fallback", "zone_settings")
 
 
-class NoApplianceError(ModbusError):
-    """The gateway answered, but reports no appliance behind it."""
-
-
 def _still_fetching(report: UpdateReport) -> bool:
     """Whether a component failed only because the gateway is still fetching."""
     return any(isinstance(err, GatewayTargetError) for err in report.failed.values())
@@ -80,7 +73,8 @@ class Gtw08Appliance(Device):
         ``DETECT_ATTEMPTS`` and ``DETECT_RETRY_DELAY`` seconds.
         """
         super().__init__(unit)
-        unit.require_timeout(timeout)
+        if timeout is not None:
+            unit.require_timeout(timeout)
         self._attempts = DETECT_ATTEMPTS if attempts is None else attempts
         self._retry_delay = DETECT_RETRY_DELAY if retry_delay is None else retry_delay
         self._setup_lock = asyncio.Lock()
@@ -118,15 +112,16 @@ class Gtw08Appliance(Device):
 
         Asks again while the gateway is still fetching registers from the
         appliance. The last update's report is in ``detect_report``. Raises
-        ``NoApplianceError`` when the gateway reports no appliance, and
-        ``ModbusError`` when it does not answer.
+        ``NoApplianceError`` when the gateway reports no appliance,
+        ``GatewayNotReadyError`` when it still has no board count after the
+        last attempt, and ``ModbusError`` when it does not answer.
         """
         device = cls(unit, timeout=timeout, attempts=attempts, retry_delay=retry_delay)
         last = device._attempts
         for attempt in range(1, last + 1):
             try:
                 report = await device.async_update()
-            except GatewayTargetError:
+            except (GatewayTargetError, GatewayNotReadyError):
                 if attempt == last:
                     raise
             else:
@@ -170,7 +165,7 @@ class Gtw08Appliance(Device):
                 "the gateway sees no appliance on its L-Bus"
             ) from err
         if summary.board_count is None:
-            raise GatewayTargetError(message="the gateway has no board count yet")
+            raise GatewayNotReadyError("the gateway has no board count yet")
         if summary.board_count == 0:
             raise NoApplianceError("the gateway reports no control board")
         self.board_count = summary.board_count

@@ -189,3 +189,15 @@ class Zone:
     async def async_write_room_setpoint(self, temperature: float) -> None:
         """Set the room temperature the zone holds in manual mode."""
         await self.write("room_setpoint_manual", temperature)
+
+    async def async_write_heating_curve_gradient(self, gradient: float) -> None:
+        """Set the gradient of the heating curve."""
+        await self.write("heating_curve_gradient", gradient)
+
+    async def async_write_heating_curve_footpoint(self, temperature: float) -> None:
+        """Set the comfort footpoint of the heating curve, in °C."""
+        await self.write("heating_curve_footpoint", temperature)
+
+    async def async_write_flow_setpoint_fixed(self, temperature: float) -> None:
+        """Set the flow temperature for a zone set to a fixed flow, in °C."""
+        await self.write("flow_setpoint_fixed", temperature)
